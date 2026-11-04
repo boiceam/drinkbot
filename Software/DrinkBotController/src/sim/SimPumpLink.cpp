@@ -271,9 +271,9 @@ std::vector<std::string> SimPumpLink::execute(Pump& p, const std::string& comman
     advance(p, now);
     p.active = false;
   } else if (cmd == "status") {
-    const char* state = !p.active ? "IDLE" : (p.reverse ? "REV" : "FWD");
-    uint32_t remaining = 0;
-    if (p.active) {
+    const char* state = p.stuck ? "FWD" : (!p.active ? "IDLE" : (p.reverse ? "REV" : "FWD"));
+    uint32_t remaining = p.stuck ? 1000 : 0;
+    if (p.active && !p.stuck) {
       uint32_t elapsed = now - p.startMs;
       remaining = elapsed >= p.durationMs ? 0 : p.durationMs - elapsed;
     }
@@ -322,6 +322,12 @@ void SimPumpLink::setWeight(int id, float grams) {
 void SimPumpLink::setFirmwareVersion(int id, const std::string& version) {
   if (Pump* p = find(id)) {
     p->version = version;
+  }
+}
+
+void SimPumpLink::setStuck(int id, bool stuck) {
+  if (Pump* p = find(id)) {
+    p->stuck = stuck;
   }
 }
 

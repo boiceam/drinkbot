@@ -45,6 +45,9 @@ class TransactionEngine {
 
   // Fails every queued request (not the in-flight one) with `status`.
   void cancelQueued(TxnStatus status);
+  // E-Stop: fails only queued dispense/prime/purge commands, and stops any
+  // earlier motion command from being retried. Polls and LED commands stay.
+  void cancelQueuedMotion(TxnStatus status);
   // Fails the in-flight request and everything queued (e.g. USB lost).
   void cancelAll(TxnStatus status);
 
@@ -59,6 +62,9 @@ class TransactionEngine {
     RetryClass retryClass = RetryClass::None;
     int retriesLeft = 0;
     bool motionRetried = false;
+    // Cancel epoch at submit time. A request from an older epoch is never
+    // retried, so a motion command can't be resent after an E-Stop.
+    uint32_t epoch = 0;
   };
 
   static RetryClass classify(const std::string& command);
@@ -79,6 +85,7 @@ class TransactionEngine {
   uint32_t deadline_ = 0;
   uint32_t quietUntil_ = 0;
   bool quiet_ = false;
+  uint32_t epoch_ = 0;
 };
 
 }  // namespace drinkbot

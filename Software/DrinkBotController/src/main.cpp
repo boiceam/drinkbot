@@ -1,15 +1,14 @@
 // DrinkBotController firmware entry point (SPEC_v3).
-// M2 wiring: logging, USB-or-simulator pump link, discovery and polling.
-// The App task, UI, network and web server are added in later milestones.
+// M3 wiring: logging, USB-or-simulator pump link and the App. Buttons/LEDs,
+// config storage, networking and the web server are added in M4-M6.
 
 #include <Arduino.h>
 
 #include <memory>
 
+#include "core/App.h"
 #include "core/Config.h"
 #include "core/Log.h"
-#include "core/PumpManager.h"
-#include "core/TransactionEngine.h"
 #include "hal/UsbPumpLink.h"
 #include "sim/SimPumpLink.h"
 
@@ -18,6 +17,7 @@ using namespace drinkbot;
 namespace {
 
 constexpr uint32_t kUsbDetectTimeoutMs = 3000;
+constexpr uint32_t kAppTickMs = 5;
 
 class MillisClock : public IClock {
  public:
@@ -30,25 +30,11 @@ class UartLogSink : public ILogSink {
   void write(const LogEntry& entry) override { Serial.println(formatLogLine(entry).c_str()); }
 };
 
-// Logs raised/cleared errors until SystemState takes this over in M3.
-class LoggingErrorReporter : public IErrorReporter {
- public:
-  void raiseError(ErrorCode code, int pumpId, const std::string& message) override {
-    LOG_E("SYS", "%s(%d): %s", errorCodeName(code), pumpId, message.c_str());
-  }
-  void clearError(ErrorCode code, int pumpId) override {
-    LOG_D("SYS", "%s(%d) cleared", errorCodeName(code), pumpId);
-  }
-};
-
 MillisClock clock_;
 UartLogSink uartSink;
-LoggingErrorReporter errorReporter;
 UsbPumpLink usbLink;
 std::unique_ptr<SimPumpLink> simLink;
-IPumpTransport* transport = nullptr;
-std::unique_ptr<TransactionEngine> engine;
-std::unique_ptr<PumpManager> pumpManager;
+std::unique_ptr<App> app;
 
 }  // namespace
 
@@ -56,31 +42,35 @@ void setup() {
   Serial.begin(115200);
   logger().setClock(&clock_);
   logger().addSink(&uartSink, LogLevel::Debug);
-  LOG_I("SYS", "DrinkBotController starting (build %s %s)", __DATE__, __TIME__);
+  LOG_I("SYS", "DrinkBotController starting (build %s %s, reset reason %d)", __DATE__, __TIME__,
+        static_cast<int>(esp_reset_reason()));
 
+  // Until config storage lands (M5) the factory default is used
   JsonDocument doc;
   makeFactoryDefaultConfig(doc);
-  Config config;
-  parseConfig(doc.as<JsonVariantConst>(), config);
+  std::string configJson;
+  serializeJson(doc, configJson);
 
   bool simulator = !usbLink.begin() || !usbLink.waitForDevice(kUsbDetectTimeoutMs);
   if (simulator) {
     LOG_W("SIM", "No pump USB device within 3 s: running in SIMULATOR mode");
+    Config config;
+    parseConfig(doc.as<JsonVariantConst>(), config);
     simLink.reset(new SimPumpLink(clock_, SimPumpLink::specsFromConfig(config)));
-    transport = simLink.get();
+    app.reset(new App(*simLink, clock_, simLink.get()));
   } else {
-    transport = &usbLink;
+    app.reset(new App(usbLink, clock_));
   }
 
-  engine.reset(new TransactionEngine(*transport, clock_));
-  pumpManager.reset(new PumpManager(*engine, clock_, errorReporter));
-  pumpManager->applyConfig(config);
-  pumpManager->setPollingEnabled(true);
+  app->setHooks({[](const std::string&) {
+                   LOG_W("CFG", "Config storage not implemented yet; change kept in RAM only");
+                   return true;
+                 },
+                 [] { ESP.restart(); }});
+  app->begin(configJson, false);
 }
 
 void loop() {
-  transport->tick();
-  engine->tick();
-  pumpManager->tick();
-  delay(5);
+  app->tick();
+  delay(kAppTickMs);
 }

@@ -60,6 +60,7 @@ void TransactionEngine::submit(int pumpId, const std::string& command, Callback 
   req->urgent = urgent;
   req->retryClass = classify(command);
   req->retriesLeft = retriesFor(req->retryClass);
+  req->epoch = epoch_;
   if (urgent) {
     // Behind any urgent request already waiting, ahead of everything else
     auto it = queue_.begin();
@@ -136,7 +137,7 @@ void TransactionEngine::complete(const TxnResult& result) {
     quietUntil_ = clock_.nowMs() + kQuietAfterFailureMs;
   }
 
-  if (!result.ok() && isTransientFailure(result.status)) {
+  if (!result.ok() && isTransientFailure(result.status) && req->epoch == epoch_) {
     if (req->retryClass == RetryClass::Motion && !req->motionRetried) {
       // The command may have run with its reply lost. Ask the pump before
       // retrying, so a lost reply never turns into a double pour.
@@ -152,6 +153,8 @@ void TransactionEngine::complete(const TxnResult& result) {
                 TxnResult ok;
                 ok.status = TxnStatus::Ok;
                 finish(req, ok);
+              } else if (req->epoch != epoch_) {
+                finish(req, original);  // cancelled (E-Stop) while checking: never resend
               } else {
                 req->motionRetried = true;
                 queue_.push_front(req);
@@ -185,6 +188,7 @@ void TransactionEngine::finish(const std::shared_ptr<Request>& req, const TxnRes
 }
 
 void TransactionEngine::cancelQueued(TxnStatus status) {
+  epoch_++;
   std::deque<std::shared_ptr<Request>> pending;
   pending.swap(queue_);
   TxnResult r;
@@ -196,7 +200,28 @@ void TransactionEngine::cancelQueued(TxnStatus status) {
   }
 }
 
+void TransactionEngine::cancelQueuedMotion(TxnStatus status) {
+  epoch_++;
+  std::vector<std::shared_ptr<Request>> cancelled;
+  for (auto it = queue_.begin(); it != queue_.end();) {
+    if ((*it)->retryClass == RetryClass::Motion) {
+      cancelled.push_back(*it);
+      it = queue_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+  TxnResult r;
+  r.status = status;
+  for (auto& req : cancelled) {
+    if (req->done) {
+      req->done(r);
+    }
+  }
+}
+
 void TransactionEngine::cancelAll(TxnStatus status) {
+  epoch_++;
   if (current_) {
     std::shared_ptr<Request> req = std::move(current_);
     current_.reset();

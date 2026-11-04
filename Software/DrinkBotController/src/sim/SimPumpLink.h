@@ -58,6 +58,8 @@ class SimPumpLink : public IPumpTransport {
   void dropNextResponse(int id);
   // The next command is neither run nor answered.
   void ignoreNextCommand(int id);
+  // `status` keeps reporting FWD, as if the pump never stopped.
+  void setStuck(int id, bool stuck);
 
   float weight(int id) const;
   bool running(int id) const;
@@ -76,6 +78,7 @@ class SimPumpLink : public IPumpTransport {
     bool missing = false;
     int dropResponses = 0;
     int ignoreCommands = 0;
+    bool stuck = false;
     bool active = false;
     bool reverse = false;
     uint32_t startMs = 0;
