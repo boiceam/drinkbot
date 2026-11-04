@@ -1,6 +1,6 @@
 // DrinkBotController firmware entry point (SPEC_v3).
-// M4 wiring: logging, USB-or-simulator pump link, the App and the button /
-// LED panel. Config storage, networking and the web server are added in M5-M6.
+// M5 wiring: logging, config storage, Wi-Fi, USB-or-simulator pump link, the
+// App and the button / LED panel. The web server is added in M6.
 
 #include <Arduino.h>
 
@@ -8,9 +8,12 @@
 
 #include "core/App.h"
 #include "core/Config.h"
+#include "core/ConfigStore.h"
 #include "core/Log.h"
 #include "core/UiController.h"
 #include "core/UiModel.h"
+#include "hal/LittleFsStore.h"
+#include "hal/NetManager.h"
 #include "hal/PanelHal.h"
 #include "hal/UsbPumpLink.h"
 #include "sim/SimPumpLink.h"
@@ -36,6 +39,9 @@ class UartLogSink : public ILogSink {
 
 MillisClock clock_;
 UartLogSink uartSink;
+LittleFsStore files;
+ConfigStore configStore(files);
+NetManager net;
 UsbPumpLink usbLink;
 std::unique_ptr<SimPumpLink> simLink;
 std::unique_ptr<App> app;
@@ -61,31 +67,38 @@ void setup() {
   bootFrame[kStatusLed] = {64, 64, 64};
   leds.show(bootFrame);
 
-  // Until config storage lands (M5) the factory default is used
-  JsonDocument doc;
-  makeFactoryDefaultConfig(doc);
+  // §9.1 step 3: mount LittleFS and load config.json -> config.bak -> default
+  if (!files.begin()) {
+    LOG_E("CFG", "LittleFS unavailable; config changes will not be saved");
+  }
   std::string configJson;
-  serializeJson(doc, configJson);
+  ConfigStore::Source source = configStore.load(configJson);
+
+  // Typed view for Wi-Fi and the simulator; the App re-validates it in begin()
+  Config config;
+  {
+    JsonDocument doc;
+    deserializeJson(doc, configJson);
+    migrateConfig(doc);
+    parseConfig(doc.as<JsonVariantConst>(), config);
+  }
+
+  // §9.1 step 5: Wi-Fi runs in the background while the pumps are found
+  net.begin(config);
 
   bool simulator = !usbLink.begin() || !usbLink.waitForDevice(kUsbDetectTimeoutMs);
   if (simulator) {
     LOG_W("SIM", "No pump USB device within 3 s: running in SIMULATOR mode");
-    Config config;
-    parseConfig(doc.as<JsonVariantConst>(), config);
     simLink.reset(new SimPumpLink(clock_, SimPumpLink::specsFromConfig(config)));
     app.reset(new App(*simLink, clock_, simLink.get()));
   } else {
     app.reset(new App(usbLink, clock_));
   }
 
-  app->setHooks({[](const std::string&) {
-                   LOG_W("CFG", "Config storage not implemented yet; change kept in RAM only");
-                   return true;
-                 },
-                 [] { ESP.restart(); }});
+  app->setHooks({[](const std::string& json) { return configStore.save(json); }, [] { ESP.restart(); }});
   ui.reset(new UiController(*app, uiModel));
   leds.show(ui->frame());  // status LED white while booting
-  app->begin(configJson, false);
+  app->begin(configJson, source != ConfigStore::Source::Primary);
 }
 
 void loop() {
@@ -93,6 +106,8 @@ void loop() {
   uiModel.updateButtons(buttons.read(), events);
   ui->handle(events);
   app->tick();
+  net.tick();
+  ui->setWifiMode(net.mode());
 
   uint32_t now = millis();
   if (timeReached(now, nextLedRefresh)) {
