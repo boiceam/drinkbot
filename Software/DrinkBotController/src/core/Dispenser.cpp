@@ -289,8 +289,10 @@ void Dispenser::emit(DispenseProgress::Status status, const std::string& reason)
     p.targetMl = s.ml;
     p.hasActual = hasActual_;
     p.actualMl = actualMl_;
+  } else if (status == DispenseProgress::Status::Aborted) {
+    p.step = static_cast<int>(std::min(stepIndex_ + 1, steps_.size()));
   } else {
-    p.step = static_cast<int>(stepIndex_);
+    p.step = static_cast<int>(steps_.size());
   }
   onProgress_(p);
 }

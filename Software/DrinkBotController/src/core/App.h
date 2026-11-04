@@ -52,7 +52,7 @@ struct Command {
     PumpSetId,      // pumpId, newId
     PumpLedTest,    // pumpId
     PumpRaw,        // pumpId, text = command
-    SimFault,       // pumpId, text = "missing" | "present" | "timeout" | "weight", number = grams
+    SimFault,       // pumpId, text = missing | present | timeout | overrun | weight, number = grams
   };
 
   Type type = Type::Estop;

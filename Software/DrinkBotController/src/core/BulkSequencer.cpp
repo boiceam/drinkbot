@@ -221,7 +221,7 @@ void BulkSequencer::emit(BulkProgress::Status status, const std::string& reason)
   p.status = status;
   p.reason = reason;
   bool perStep = status == BulkProgress::Status::Running || status == BulkProgress::Status::Done ||
-                 status == BulkProgress::Status::Skipped;
+                 status == BulkProgress::Status::Skipped || status == BulkProgress::Status::Aborted;
   if (perStep && stepIndex_ < plan_.steps.size()) {
     const BulkStep& s = step();
     p.step = static_cast<int>(stepIndex_ + 1);

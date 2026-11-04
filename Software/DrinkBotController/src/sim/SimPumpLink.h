@@ -58,7 +58,7 @@ class SimPumpLink : public IPumpTransport {
   void dropNextResponse(int id);
   // The next command is neither run nor answered.
   void ignoreNextCommand(int id);
-  // `status` keeps reporting FWD, as if the pump never stopped.
+  // `status` keeps reporting FWD, as if the pump never stopped, until a `stop`.
   void setStuck(int id, bool stuck);
 
   float weight(int id) const;

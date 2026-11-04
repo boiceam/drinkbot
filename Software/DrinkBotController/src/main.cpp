@@ -1,6 +1,7 @@
 // DrinkBotController firmware entry point (SPEC_v3).
-// M5 wiring: logging, config storage, Wi-Fi, USB-or-simulator pump link, the
-// App and the button / LED panel. The web server is added in M6.
+// Wiring: logging, config storage, Wi-Fi, USB-or-simulator pump link, the App,
+// the button / LED panel and the web server. Everything except the AsyncTCP
+// callbacks runs on this loop task (§4.4).
 
 #include <Arduino.h>
 
@@ -16,6 +17,7 @@
 #include "hal/NetManager.h"
 #include "hal/PanelHal.h"
 #include "hal/UsbPumpLink.h"
+#include "hal/WebHub.h"
 #include "sim/SimPumpLink.h"
 
 using namespace drinkbot;
@@ -49,9 +51,16 @@ Buttons buttons;
 LedStrip leds;
 UiModel uiModel(clock_);
 std::unique_ptr<UiController> ui;
+std::unique_ptr<WebHub> web;
 uint32_t nextLedRefresh = 0;
 
 }  // namespace
+
+// Keep a freshly flashed OTA image pending until the web server starts;
+// WebHub::begin() then marks it valid (§13 rollback).
+extern "C" bool verifyRollbackLater() {
+  return true;
+}
 
 void setup() {
   Serial.begin(115200);
@@ -97,6 +106,9 @@ void setup() {
 
   app->setHooks({[](const std::string& json) { return configStore.save(json); }, [] { ESP.restart(); }});
   ui.reset(new UiController(*app, uiModel));
+  web.reset(new WebHub(*app, *ui, net, std::string(__DATE__) + " " + __TIME__));
+  app->addListener(web.get());
+  logger().addSink(web.get(), LogLevel::Info);  // web log level is changeable at runtime
   leds.show(ui->frame());  // status LED white while booting
   app->begin(configJson, source != ConfigStore::Source::Primary);
 }
@@ -108,6 +120,10 @@ void loop() {
   app->tick();
   net.tick();
   ui->setWifiMode(net.mode());
+  if (!web->started() && net.hasIp()) {
+    web->begin();  // §9.1 step 7: as soon as there is an IP
+  }
+  web->tick();
 
   uint32_t now = millis();
   if (timeReached(now, nextLedRefresh)) {

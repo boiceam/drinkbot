@@ -588,6 +588,8 @@ void App::handleSimFault(Command& cmd) {
     sim_->setMissing(cmd.pumpId, false);
   } else if (cmd.text == "timeout") {
     sim_->ignoreNextCommand(cmd.pumpId);
+  } else if (cmd.text == "overrun") {
+    sim_->setStuck(cmd.pumpId, true);
   } else if (cmd.text == "weight" && !std::isnan(cmd.number)) {
     sim_->setWeight(cmd.pumpId, cmd.number);
   } else {

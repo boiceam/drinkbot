@@ -270,6 +270,7 @@ std::vector<std::string> SimPumpLink::execute(Pump& p, const std::string& comman
   } else if (cmd == "stop") {
     advance(p, now);
     p.active = false;
+    p.stuck = false;
   } else if (cmd == "status") {
     const char* state = p.stuck ? "FWD" : (!p.active ? "IDLE" : (p.reverse ? "REV" : "FWD"));
     uint32_t remaining = p.stuck ? 1000 : 0;

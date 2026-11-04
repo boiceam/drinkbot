@@ -34,7 +34,7 @@ struct DispenseProgress {
   enum class Status : uint8_t { Starting, Done, Complete, Aborted };
   std::string recipeId;
   float volumeMl = 0;
-  int step = 0;   // 1-based; on COMPLETE / ABORTED, the number of steps finished
+  int step = 0;   // 1-based; on COMPLETE = steps, on ABORTED = the step that was running
   int steps = 0;
   std::string liquid;
   int pumpId = 0;
@@ -72,7 +72,7 @@ struct BulkPlan {
 struct BulkProgress {
   enum class Status : uint8_t { Starting, Running, Done, Skipped, Complete, Aborted };
   BulkOp op = BulkOp::PrimeAll;
-  int step = 0;   // 1-based; 0 on STARTING / COMPLETE / ABORTED
+  int step = 0;   // 1-based; 0 on STARTING / COMPLETE, the running step on ABORTED
   int steps = 0;
   int pumpId = 0;
   std::string liquid;
