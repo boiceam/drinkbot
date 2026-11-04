@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "drinkbot-mock",
+      "runtimeExecutable": "python3",
+      "runtimeArgs": ["Software/DrinkBotController/tools/mock_server.py", "--port", "8080", "--speed", "3"],
+      "port": 8080
+    }
+  ]
+}

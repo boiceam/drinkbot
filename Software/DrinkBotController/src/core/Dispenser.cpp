@@ -50,6 +50,12 @@ OpResult Dispenser::start(const std::string& recipeId, float volumeMl, StartedHa
       return OpResult::fail(ErrCode::kPrecheckFailed,
                             s.liquid + " pump " + std::to_string(s.pumpId) + " has an active error");
     }
+    if (runMs(s) > kMaxPumpRunMs) {
+      return OpResult::fail(ErrCode::kPrecheckFailed,
+                            s.liquid + " needs " + std::to_string(runMs(s) / 1000) + " s on pump " +
+                                std::to_string(s.pumpId) + ", over the " + std::to_string(kMaxPumpRunMs / 1000) +
+                                " s pump limit");
+    }
   }
 
   generation_++;
@@ -119,15 +125,14 @@ void Dispenser::beginStep() {
   phase_ = Phase::Step;
   hasActual_ = false;
   const PourStep& s = step();
-  const PumpConfig* pc = pumps_.pumpConfig(s.pumpId);
   LOG_I("DISP", "Step %u/%u: %s %s ml on pump %d", static_cast<unsigned>(stepIndex_ + 1),
         static_cast<unsigned>(steps_.size()), s.liquid.c_str(), mlText(s.ml).c_str(), s.pumpId);
   emit(DispenseProgress::Status::Starting);
 
   uint32_t gen = generation_;
   int pumpId = s.pumpId;
-  int msPerMl = pc ? pc->msPerMl : 100;
-  pumps_.refreshWeight(pumpId, [this, gen, pumpId, msPerMl](bool ok, float) {
+  uint32_t ms = runMs(s);
+  pumps_.refreshWeight(pumpId, [this, gen, pumpId, ms](bool ok, float) {
     if (gen != generation_) {
       return;
     }
@@ -136,37 +141,34 @@ void Dispenser::beginStep() {
       return;
     }
     weightBeforeG_ = pumps_.find(pumpId)->weightG;
-    engine_.submit(pumpId, "smilli " + std::to_string(msPerMl), [this, gen, pumpId](const TxnResult& r) {
+    pumps_.prepareDispenseLed(pumpId);
+    // Pump firmware 0.4.0: dispense <ms> <ledMode>; the volume-to-time conversion happens here
+    engine_.submit(pumpId, "dispense " + std::to_string(ms) + " 3", [this, gen, pumpId](const TxnResult& d) {
       if (gen != generation_) {
         return;
       }
-      if (!r.ok()) {
-        fail(ErrorCode::PumpComm, "Pump " + std::to_string(pumpId) + " rejected its flow rate");
+      if (!d.ok()) {
+        fail(ErrorCode::PumpComm, "Pump " + std::to_string(pumpId) + " did not start the pour (" +
+                                      txnStatusName(d.status) + ")");
         return;
       }
-      pumps_.prepareDispenseLed(pumpId);
-      engine_.submit(pumpId, "dispense " + mlText(step().ml) + " 3", [this, gen, pumpId](const TxnResult& d) {
-        if (gen != generation_) {
-          return;
-        }
-        if (!d.ok()) {
-          fail(ErrorCode::PumpComm, "Pump " + std::to_string(pumpId) + " did not start the pour (" +
-                                        txnStatusName(d.status) + ")");
-          return;
-        }
-        stepCommandsDone();
-      });
+      stepCommandsDone();
     });
   });
 }
 
 void Dispenser::stepCommandsDone() {
   const PourStep& s = step();
-  const PumpConfig* pc = pumps_.pumpConfig(s.pumpId);
-  uint32_t expectedMs = static_cast<uint32_t>(s.ml * (pc ? pc->msPerMl : 100) + 0.5f);
+  uint32_t expectedMs = runMs(s);
   pumps_.setActivity(s.pumpId, PumpActivity::Dispensing);
   monitor_.start(s.pumpId, expectedMs);
   phase_ = Phase::Running;
+}
+
+uint32_t Dispenser::runMs(const PourStep& s) const {
+  const PumpConfig* pc = pumps_.pumpConfig(s.pumpId);
+  uint32_t ms = static_cast<uint32_t>(s.ml * (pc ? pc->msPerMl : 100) + 0.5f);
+  return std::max<uint32_t>(ms, 1);
 }
 
 void Dispenser::tick() {

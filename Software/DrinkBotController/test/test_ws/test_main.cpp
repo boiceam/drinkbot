@@ -102,7 +102,7 @@ void test_pumps_message() {
   TEST_ASSERT_EQUAL(1, pumps[0]["pumpId"].as<int>());
   TEST_ASSERT_TRUE(pumps[0]["present"].as<bool>());
   TEST_ASSERT_TRUE(pumps[0]["isBridge"].as<bool>());
-  TEST_ASSERT_EQUAL_STRING("0.3.0-sim", pumps[0]["fwVersion"]);
+  TEST_ASSERT_EQUAL_STRING("0.4.0-sim", pumps[0]["fwVersion"]);
   TEST_ASSERT_EQUAL_FLOAT(750.0f, pumps[0]["levelMl"].as<float>());
   TEST_ASSERT_EQUAL_STRING("OK", pumps[0]["levelState"]);
   TEST_ASSERT_EQUAL_STRING("IDLE", pumps[0]["activity"]);
@@ -180,8 +180,12 @@ void test_parse_client_commands() {
   m = parseClientMessage(R"({"type":"dispense"})");
   TEST_ASSERT_TRUE(std::isnan(m.command.number));  // use the active volume
 
-  m = parseClientMessage(R"({"type":"purge","pumpId":4,"seconds":10})");
+  m = parseClientMessage(R"({"type":"purge","pumpId":4})");
   TEST_ASSERT_TRUE(m.command.type == Command::Type::Purge);
+  TEST_ASSERT_EQUAL(4, m.command.pumpId);
+
+  m = parseClientMessage(R"({"type":"pumpStop","pumpId":4})");
+  TEST_ASSERT_TRUE(m.command.type == Command::Type::PumpStop);
   TEST_ASSERT_EQUAL(4, m.command.pumpId);
 
   m = parseClientMessage(R"({"type":"reboot","force":true})");

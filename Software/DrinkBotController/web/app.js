@@ -128,8 +128,8 @@ function cmd(type, fields, okMsg) {
 }
 
 const handlers = {
-  hello(m) { S.hello = m; $('#simBanner').hidden = !m.simulator; $('#simPanel').hidden = !m.simulator; document.title = 'DrinkBot — ' + (m.hostname || ''); renderInfo(); },
-  state(m) { S.state = m; renderHeader(); renderDash(); renderMaint(); applyEnabled(); },
+  hello(m) { S.hello = m; S.manual = S.manualReq = null; $('#simBanner').hidden = !m.simulator; $('#simPanel').hidden = !m.simulator; document.title = 'DrinkBot — ' + (m.hostname || ''); renderInfo(); },
+  state(m) { S.state = m; if (m.system !== 'MANUAL') S.manual = S.manualReq = null; renderHeader(); renderDash(); renderMaint(); applyEnabled(); },
   pumps(m) { S.pumps = m.pumps || []; renderDash(); updatePumpStatusCells(); renderMaint(); applyEnabled(); },
   config(m) { onConfig(m.config || m); },
   log(m) { logAdd([m]); },
@@ -687,6 +687,7 @@ $('#bPrimeAll').addEventListener('click', () => startBulk('primeAll'));
 $('#bPurgeAll').addEventListener('click', () => startBulk('purgeAll'));
 
 function onBulkProgress(m) {
+  if (m.op === 'prime' || m.op === 'purge') { onManualProgress(m); return; }
   let B = S.bulk;
   if (m.status === 'STARTING' || !B || B.op !== m.op || B.final) {
     const plan = bulkPlan(m.op);
@@ -740,22 +741,40 @@ function makeCard(id) {
   c.strip = el('div', { class: 'strip', title: 'Pump LED strip (tracked state)' });
   for (let i = 0; i < 20; i++) c.strip.append(el('i'));
   c.auto = el('div', { class: 'small muted' });
-  c.pSec = el('input', { type: 'number', min: 1, max: 60, step: 1, value: '', 'data-needs-conn': '', title: 'Prime seconds' });
-  c.uSec = el('input', { type: 'number', min: 1, max: 60, step: 1, value: '', 'data-needs-conn': '', title: 'Purge seconds' });
-  c.pBtn = el('button', { class: 'btn small', text: 'Prime', 'data-needs-conn': '', onclick: () => single('prime', id, c.pSec) });
-  c.uBtn = el('button', { class: 'btn small warn', text: 'Purge', 'data-needs-conn': '', onclick: () => single('purge', id, c.uSec) });
+  c.pBtn = el('button', { class: 'btn small', 'data-needs-conn': '', onclick: () => single('prime', id) });
+  c.uBtn = el('button', { class: 'btn small warn', 'data-needs-conn': '', onclick: () => single('purge', id) });
+  c.run = el('span', { class: 'muted small' });
   c.root.append(el('div', { class: 'top' }, el('span', null, c.id, ' ', c.bridge), c.badge), c.liq, c.lvl, c.kv, c.strip, c.auto,
-    el('div', { class: 'acts' }, c.pSec, c.pBtn, el('span', { class: 'muted small', text: 's' }), c.uSec, c.uBtn, el('span', { class: 'muted small', text: 's' })));
-  if (S.config) { c.pSec.value = S.config.defaults.primeSec; c.uSec.value = S.config.defaults.purgeSec; }
+    el('div', { class: 'acts' }, c.pBtn, c.uBtn, c.run));
   return c;
 }
-async function single(kind, id, input) {
-  const s = Number(input.value);
-  if (!isFinite(s) || s < 1 || s > 60) { toast('Seconds must be 1–60', 'err'); return; }
-  const p = cfgPump(id);
-  if (kind === 'purge' && !await confirmDlg('Purge pump ' + id + '?', 'Runs pump ' + id + ' (' + (p && p.liquid || 'unloaded') + ') in reverse for ' + s + ' s, pushing liquid back to the bottle.', 'Purge', true)) return;
-  cmd(kind, { pumpId: id, seconds: s });
+
+// Manual prime/purge (§9.6.1): runs until stopped, at most MANUAL_MAX_MS; one pump at a time.
+// Pressing Prime/Purge on another pump makes the controller stop the running one first.
+const MANUAL_MAX_MS = 120000;
+function onManualProgress(m) {
+  if (m.status === 'RUNNING') S.manual = { op: m.op, pumpId: m.pumpId, since: Date.now() };
+  else if (m.status === 'DONE' || m.status === 'ABORTED' || m.status === 'COMPLETE') {
+    if (S.manual && (m.pumpId == null || S.manual.pumpId === m.pumpId)) S.manual = null;
+  }
+  if (S.manualReq && (m.status === 'RUNNING' || m.status === 'ABORTED')) S.manualReq = null;
+  renderPumpCards();
 }
+// The pump running a manual prime/purge, from bulkProgress or (after a reconnect) the pump activity
+function manualRun() {
+  if (S.manual) return S.manual;
+  if (sys() !== 'MANUAL' || (S.bulk && !S.bulk.final)) return null;
+  const rt = (S.pumps || []).find((p) => p.activity === 'PRIMING' || p.activity === 'PURGING');
+  return rt ? { op: rt.activity === 'PRIMING' ? 'prime' : 'purge', pumpId: rt.pumpId, since: null } : null;
+}
+function single(kind, id) {
+  const run = manualRun();
+  if (run && run.pumpId === id && run.op === kind) { cmd('pumpStop', { pumpId: id }); return; }
+  S.manualReq = { op: kind, pumpId: id };
+  renderPumpCards();
+  cmd(kind, { pumpId: id }).then((d) => { if (d === undefined) { S.manualReq = null; renderPumpCards(); } });
+}
+setInterval(() => { if (S.tab === 'dash' && S.manual) renderPumpCards(); }, 1000);
 function renderPumpCards() {
   if (!S.config) return;
   const box = $('#pumpCards');
@@ -795,8 +814,20 @@ function renderPumpCards() {
     const running = (rt.activity && rt.activity !== 'IDLE') || (bulkRun && bulkRun.pumpId === p.pumpId);
     c.root.classList.toggle('running', !!running);
     c.root.classList.toggle('missing', rt.present === false);
-    const off = !canManual() || rt.present === false || fwOld(rt.fwVersion);
-    setOff(c.pBtn, off); setOff(c.uBtn, off); applyOne(c.pSec); applyOne(c.uSec);
+    // A manual run may be replaced by another, so the buttons stay live during one
+    const run = manualRun(), req = S.manualReq;
+    const canStart = S.connected && !errorsOf('blocking').length && (!isBusy() || !!run);
+    const off = !canStart || rt.present === false || fwOld(rt.fwVersion);
+    [['prime', c.pBtn, 'Prime', 'btn small'], ['purge', c.uBtn, 'Purge', 'btn small warn']].forEach(([op, b, label, cls]) => {
+      const mine = run && run.pumpId === p.pumpId && run.op === op;
+      const pending = !mine && req && req.pumpId === p.pumpId && req.op === op;
+      b.textContent = mine ? '■ Stop ' + label.toLowerCase() : pending ? label + '…' : label;
+      b.className = mine ? 'btn small danger' : cls;
+      b.title = mine ? 'Stop pump ' + p.pumpId : label + ' pump ' + p.pumpId + ' until you press Stop (at most ' + MANUAL_MAX_MS / 1000 + ' s)' + (run && run.pumpId !== p.pumpId ? '; stops pump ' + run.pumpId + ' first' : '');
+      setOff(b, mine ? !S.connected : off);
+    });
+    const mineRun = run && run.pumpId === p.pumpId;
+    c.run.textContent = mineRun && run.since ? Math.min(MANUAL_MAX_MS / 1000, Math.floor((Date.now() - run.since) / 1000)) + ' / ' + MANUAL_MAX_MS / 1000 + ' s' : '';
   });
 }
 // Pump LED strip preview: 20 dots, modes 1 solid, 2 fade, 3 loop chase, 4 bounce (50 ms steps, tail 4).
@@ -1094,8 +1125,7 @@ const SETTINGS = [
   ['Defaults at boot', [
     ['defaults.volumeMl', 'Drink volume (ml)', { min: 1, max: 1000, step: 1 }],
     ['defaults.recipeId', 'Recipe', { select: 'recipes' }],
-    ['defaults.primeSec', 'Prime field default (s)', { min: 1, max: 60, step: 1 }],
-    ['defaults.purgeSec', 'Purge field default (s)', { min: 1, max: 60, step: 1 }]]],
+    ['defaults.primeSec', 'Auto prime for a new pump (s)', { min: 1, max: 60, step: 1 }]]],
   ['Device', [
     ['ui.ledBrightness', 'Controller LED brightness (0–255)', { min: 0, max: 255, step: 1, int: 1 }],
     ['device.hostname', 'Hostname (applies after reboot)', { text: 1 }, '→ http://<hostname>.local'],

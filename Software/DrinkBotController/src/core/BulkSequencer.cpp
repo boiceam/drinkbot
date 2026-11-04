@@ -55,9 +55,9 @@ OpResult BulkSequencer::startAll(BulkOp op) {
   return begin(std::move(p));
 }
 
-OpResult BulkSequencer::startSingle(BulkOp op, int pumpId, float seconds) {
-  if (!(seconds >= kMinManualSec && seconds <= kMaxManualSec)) {
-    return OpResult::fail(ErrCode::kInvalid, "Seconds must be between 1 and 60");
+OpResult BulkSequencer::startSingle(BulkOp op, int pumpId) {
+  if (active() && !singleActive()) {
+    return OpResult::fail(ErrCode::kBusy, std::string(bulkOpName(plan_.op)) + " is running");
   }
   const PumpConfig* pc = pumps_.pumpConfig(pumpId);
   const PumpState* ps = pumps_.find(pumpId);
@@ -72,10 +72,63 @@ OpResult BulkSequencer::startSingle(BulkOp op, int pumpId, float seconds) {
   BulkStep s;
   s.pumpId = pumpId;
   s.liquid = pc->liquid;
-  s.durationMs = static_cast<uint32_t>(std::lround(seconds * 1000.0f));
+  s.durationMs = kManualRunMs;
   p.steps.push_back(s);
   p.estimatedTotalMs = s.durationMs + MotionMonitor::kStartMarginMs;
+  if (singleActive()) {
+    // One pump at a time: stop the running one, then start this one
+    LOG_I("PUMP", "Stopping pump %d before %s pump %d", step().pumpId,
+          bulkOpIsReverse(op) ? "purging" : "priming", pumpId);
+    pending_ = std::move(p);
+    hasPending_ = true;
+    if (phase_ != Phase::Stopping) {
+      stopCurrent();
+    }
+    return OpResult::success();
+  }
   return begin(std::move(p));
+}
+
+OpResult BulkSequencer::stopSingle() {
+  if (!singleActive()) {
+    return OpResult::fail(ErrCode::kInvalid, "No prime or purge is running");
+  }
+  hasPending_ = false;
+  if (phase_ != Phase::Stopping) {
+    stopCurrent();
+  }
+  return OpResult::success();
+}
+
+void BulkSequencer::stopCurrent() {
+  generation_++;
+  monitor_.reset();
+  phase_ = Phase::Stopping;
+  uint32_t gen = generation_;
+  int pumpId = step().pumpId;
+  engine_.submit(
+      pumpId, "stop",
+      [this, gen, pumpId](const TxnResult& r) {
+        if (gen != generation_) {
+          return;
+        }
+        if (!r.ok()) {
+          hasPending_ = false;
+          fail(ErrorCode::PumpComm, "Pump " + std::to_string(pumpId) + " did not acknowledge stop (" +
+                                        txnStatusName(r.status) + ")");
+          return;
+        }
+        LOG_I("PUMP", "Pump %d stopped", pumpId);
+        pumps_.setActivity(pumpId, PumpActivity::Idle);
+        pumps_.restoreIdleLed(pumpId);
+        emit(BulkProgress::Status::Done, "stopped");
+        complete();
+        if (hasPending_) {
+          hasPending_ = false;
+          begin(std::move(pending_));
+        }
+      },
+      true);
 }
 
 OpResult BulkSequencer::begin(BulkPlan plan) {
@@ -110,8 +163,13 @@ void BulkSequencer::nextStep() {
     LOG_W("PUMP", "Pump %d (%s) is EMPTY", s.pumpId, s.liquid.c_str());
   }
   bool reverse = bulkOpIsReverse(plan_.op);
-  LOG_I("PUMP", "%s pump %d (%s) for %.1f s", reverse ? "Purging" : "Priming", s.pumpId, s.liquid.c_str(),
-        s.durationMs / 1000.0f);
+  if (bulkOpIsAll(plan_.op)) {
+    LOG_I("PUMP", "%s pump %d (%s) for %.1f s", reverse ? "Purging" : "Priming", s.pumpId, s.liquid.c_str(),
+          s.durationMs / 1000.0f);
+  } else {
+    LOG_I("PUMP", "%s pump %d (%s) until stopped (at most %.0f s)", reverse ? "Purging" : "Priming", s.pumpId,
+          s.liquid.c_str(), s.durationMs / 1000.0f);
+  }
   emit(BulkProgress::Status::Running);
 
   pumps_.showManualLed(s.pumpId);
@@ -197,7 +255,8 @@ void BulkSequencer::abort(const std::string& reason, bool sendStop) {
   generation_++;
   monitor_.reset();
   phase_ = Phase::Idle;
-  if (phase == Phase::Command || phase == Phase::Running) {
+  hasPending_ = false;
+  if (phase == Phase::Command || phase == Phase::Running || phase == Phase::Stopping) {
     int pumpId = step().pumpId;
     if (sendStop) {
       engine_.submit(pumpId, "stop", nullptr, true);

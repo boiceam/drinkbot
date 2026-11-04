@@ -291,11 +291,27 @@ void App::handle(Command& cmd) {
       return;
     }
 
+    case T::PumpStop: {
+      LOG_I("PUMP", "Stop pump %d requested (%s)", cmd.pumpId, cmd.source.c_str());
+      if (bulk_.singleActive()) {
+        replyOp(cmd, bulk_.stopSingle());
+      } else if (dispenser_.active() || bulk_.active()) {
+        reply(cmd, failure(ErrCode::kBusy, "Use E-Stop to stop a dispense or Prime/Purge All"));
+      } else {
+        // Nothing of ours is running; stop the pump anyway in case the UI knows better
+        engine_.submit(cmd.pumpId, "stop", nullptr, true);
+        reply(cmd, {});
+      }
+      return;
+    }
+
     case T::Prime:
     case T::Purge:
     case T::PrimeAll:
     case T::PurgeAll: {
-      if (!guardIdle(cmd)) {
+      bool single = cmd.type == T::Prime || cmd.type == T::Purge;
+      // A manual prime/purge may replace another one (it is stopped first)
+      if (!(single && bulk_.singleActive()) && !guardIdle(cmd)) {
         return;
       }
       if (system_.hasBlockingError()) {
@@ -307,7 +323,7 @@ void App::handle(Command& cmd) {
                   : cmd.type == T::PrimeAll ? BulkOp::PrimeAll
                                             : BulkOp::PurgeAll;
       LOG_I("PUMP", "%s requested (%s)", bulkOpName(op), cmd.source.c_str());
-      OpResult r = bulkOpIsAll(op) ? bulk_.startAll(op) : bulk_.startSingle(op, cmd.pumpId, cmd.number);
+      OpResult r = bulkOpIsAll(op) ? bulk_.startAll(op) : bulk_.startSingle(op, cmd.pumpId);
       replyOp(cmd, r);
       return;
     }

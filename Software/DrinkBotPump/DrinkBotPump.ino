@@ -33,14 +33,12 @@ constexpr uint32_t kScaleActionWaitTimeMs = 2000;
 constexpr uint8_t  kScaleCalibrationReadings = 20;
 constexpr uint8_t  kScaleWaitDelayMs = 5;
 constexpr uint32_t kMaxMotionMs = 120000;
-constexpr float    kMaxDispenseMl = 1000.0;
 constexpr uint8_t  kBroadcastAddress = 255;
 
 struct DeviceConfig {
   uint8_t id;
   float scaleFactor;
   int32_t scaleOffset;
-  uint16_t pumpMilliliterDurationMs;
 };
 
 // Constant parameters
@@ -75,7 +73,7 @@ constexpr uint8_t kMaxTokens = 8;
 constexpr uint8_t kMaxCommandLength = 15;
 
 constexpr uint16_t kConfigEepromAddress = 0;
-const char* kFirmwareVersion = "0.3.0";
+const char* kFirmwareVersion = "0.4.0";
 
 constexpr uint8_t kPumpEnabled = 1;
 constexpr uint8_t kPumpDisabled = 0;
@@ -688,7 +686,6 @@ void clearConfig() {
   config.id = 0;
   config.scaleOffset = 0.0;
   config.scaleFactor = 1.0;
-  config.pumpMilliliterDurationMs = 5000;
   saveConfig();
 }
 
@@ -807,12 +804,6 @@ void processCommand(char* buf) {
     char outBuf[32];
     sprintf(outBuf, "P,ID,%d\n", config.id);
     writeOutput(outBuf);
-  } else if (strncmp("smilli", command, kMaxCommandLength) == 0 && argCount > 0) {
-    config.pumpMilliliterDurationMs = atoi(token[1]);
-  } else if (strncmp("gmilli", command, kMaxCommandLength) == 0) {
-    char outBuf[32];
-    sprintf(outBuf, "P,MILLI,%d\n", config.pumpMilliliterDurationMs);
-    writeOutput(outBuf);
   } else if (strncmp("ledcolor", command, kMaxCommandLength) == 0 && argCount > 2) {
     ledR = atoi(token[1]);
     ledG = atoi(token[2]);
@@ -841,27 +832,23 @@ void processCommand(char* buf) {
       ledStopPending = false;
     }
   } else if (strncmp("dispense", command, kMaxCommandLength) == 0 && argCount > 0) {
-    float ml = atof(token[1]);
+    // The controller converts volume to run time; the pump only runs for <ms>
+    uint32_t duration = strtoul(token[1], NULL, 10);
     uint8_t dispLedMode = 0;
     if (argCount > 1) {
       dispLedMode = atoi(token[2]);
     }
 
-    if (ml <= 0.0 || ml > kMaxDispenseMl) {
-      Log.warningln("PUMP - Dispense volume out of range");
-      result = false;
-    } else {
-      uint32_t duration = (uint32_t)(ml * config.pumpMilliliterDurationMs + 0.5);
-      result = startPump(kPumpForward, duration);
+    // startPump rejects 0, anything over kMaxMotionMs, and a busy pump
+    result = startPump(kPumpForward, duration);
 
-      if (result && dispLedMode > 0) {
-        ledMode = dispLedMode;
-        ledTimerActive = true;
-        ledTimerEndTime = millis() + duration;
-        ledStopPending = false;
-        if (ledMaxBrightness == 0) {
-           ledMaxBrightness = 255;
-        }
+    if (result && dispLedMode > 0) {
+      ledMode = dispLedMode;
+      ledTimerActive = true;
+      ledTimerEndTime = millis() + duration;
+      ledStopPending = false;
+      if (ledMaxBrightness == 0) {
+         ledMaxBrightness = 255;
       }
     }
   } else if (strncmp("prime", command, kMaxCommandLength) == 0 && argCount > 0) {

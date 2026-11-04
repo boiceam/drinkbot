@@ -14,3 +14,4 @@ build/
 
 # PlatformIO / generated
 Software/DrinkBotController/src/generated/
+__pycache__/

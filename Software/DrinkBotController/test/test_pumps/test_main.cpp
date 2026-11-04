@@ -216,7 +216,7 @@ void test_sim_dispense_lowers_weight_by_density() {
   Rig rig;
   rig.discover();
   float before = rig.sim.weight(2);
-  TEST_ASSERT_TRUE(rig.request(2, "dispense 10").ok());
+  TEST_ASSERT_TRUE(rig.request(2, "dispense 1000").ok());
   rig.run(1200);
   TEST_ASSERT_FALSE(rig.sim.running(2));
   TEST_ASSERT_FLOAT_WITHIN(0.01f, 10 * 1.05f, before - rig.sim.weight(2));
@@ -230,7 +230,7 @@ void test_busy_pump_rejects_motion() {
   Rig rig;
   rig.discover();
   TEST_ASSERT_TRUE(rig.request(2, "prime 2000").ok());
-  TEST_ASSERT_TRUE(rig.request(2, "dispense 5").status == TxnStatus::Err);
+  TEST_ASSERT_TRUE(rig.request(2, "dispense 500").status == TxnStatus::Err);
 }
 
 void test_lost_motion_reply_is_confirmed_by_status_not_resent() {
@@ -238,8 +238,8 @@ void test_lost_motion_reply_is_confirmed_by_status_not_resent() {
   rig.discover();
   rig.sim.clearReceived();
   rig.sim.dropNextResponse(2);
-  TEST_ASSERT_TRUE(rig.request(2, "dispense 50").ok());
-  TEST_ASSERT_EQUAL(1, rig.count("bridge 2 dispense 50"));  // no double pour
+  TEST_ASSERT_TRUE(rig.request(2, "dispense 5000").ok());
+  TEST_ASSERT_EQUAL(1, rig.count("bridge 2 dispense 5000"));  // no double pour
   TEST_ASSERT_EQUAL(1, rig.count("bridge 2 status"));
   TEST_ASSERT_TRUE(rig.sim.running(2));
 }

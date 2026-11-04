@@ -20,7 +20,6 @@ Core behaviors are defined at the top of `DrinkBotPump.ino` using `constexpr` co
 *   `kScaleMeasurementWaitTimeMs` / `kScaleReadingsPerMeasurement` - The timeout limits and readings averaged per standard task loop pass.
 *   `kScaleActionWaitTimeMs` / `kScaleCalibrationReadings` - Higher-precision read configurations used strictly when zeroing (tare) or calibrating the scale.
 *   `kMaxMotionMs` (Default 120000ms) - Safety cap on any single pump run. Any `dispense`, `prime` or `purge` that would run longer is rejected.
-*   `kMaxDispenseMl` (Default 1000) - Largest volume a single `dispense` accepts.
 *   `kBroadcastAddress` (Default 255) - RS485 address that every pump obeys without replying.
 
 ## Debugging Setup
@@ -38,7 +37,7 @@ The device actively listens on two separate serial interfaces and dynamically ro
 
 **1. Standard UART (USB)**
 A traditional text-based interface used for direct computer-to-device communication. Commands are space-delimited text strings terminated by a newline (`\n`) character.
-*   **Example Input:** `dispense 50\n`
+*   **Example Input:** `dispense 5000\n`
 *   **Example Response:** `R,OK\n`
 
 **2. RS485 Shared Bus (CommBus)**
@@ -46,7 +45,7 @@ A robust, addressed, and error-checked protocol designed for a single master to 
 *   **Packet Structure:** `*[address|command|CRC32]`
 *   **Response Structure:** `$[response|CRC32]`
 *   **Behavior:** Devices only process packets matching their configured ID (address). Any CRC32 mismatch or unrecognized address is silently ignored.
-*   **Example:** `*[3|dispense 50|D2A8F3B1]` (Command to device ID 3 to dispense 50ml)
+*   **Example:** `*[3|dispense 5000|D2A8F3B1]` (Command to device ID 3 to dispense for 5000 ms)
 
 **3. UART-to-RS485 Bridging**
 Any device connected directly to a computer (or a DrinkBotController) via USB can act as a network bridge using the `bridge` command. It sends a properly formatted RS485 packet out to the shared bus. Then it forwards every response packet from the targeted device back over UART, verbatim and one per line, until the device's final `R,<result>` packet arrives.
@@ -76,16 +75,15 @@ All commands return `R,OK\n` on success, `R,ERR\n` on failure, or `R,INVLD\n` fo
 *   `tare`: Tare the scale and save the offset to EEPROM. Tare with the empty liquid container on the scale, so readings are liquid weight only.
 *   `cal <weight>`: Calibrate the scale against a known weight and save to EEPROM.
 *   `weight`: Read current scale weight (Returns: `P,WEIGHT,<float>`).
-*   `scfg`: Explicitly save active config (ID, scale, ms/ml) to EEPROM.
+*   `scfg`: Explicitly save active config (ID and scale calibration) to EEPROM.
 
 **Pump Operations**
 Every motion command is rejected with `R,ERR` if the pump is already running, or if the run would last 0 ms or more than `kMaxMotionMs` (120 s).
-*   **`dispense <ml> [ledMode]`**: Starts the non-blocking dispense of `<ml>` (decimal, greater than 0 and at most 1000) at the configured ms/ml rate. If an optional `ledMode` (1-4) is given, that LED mode runs for the length of the pump cycle. The reply comes when the pump **starts**; use `status` to see when it finishes.
+*   **`dispense <ms> [ledMode]`**: Runs the pump forward for `<ms>` milliseconds (1 to 120000). The controller converts volume to run time using its own per-pump calibration; the pump has no ms/ml setting. If an optional `ledMode` (1-4) is given, that LED mode runs for the length of the pump cycle. The reply comes when the pump **starts**; use `status` to see when it finishes.
 *   `prime <ms>`: Runs the pump forward for the specified milliseconds.
 *   `purge <ms>`: Runs the pump in reverse for the specified milliseconds.
 *   `stop`: Stops the pump immediately and cancels any dispense LED timer. Always returns `R,OK`.
 *   `status`: Returns `P,STATUS,<IDLE|FWD|REV>,<remainingMs>`.
-*   `smilli <ms>` / `gmilli`: Set/Get the milliseconds required to pump 1 milliliter (Returns: `P,MILLI,<ms>`).
 
 **LED Control**
 *   `ledcolor <R> <G> <B>`: Set the base color (0-255 per channel).
@@ -96,9 +94,14 @@ Every motion command is rejected with `R,ERR` if the pump is already running, or
 
 **System**
 *   `bridge <id> <command>`: Bridge a standard command to a specific device (or `255` for broadcast) over RS485. See Communication Protocols above.
-*   `version`: Returns firmware version (Returns: `P,VER,0.3.0`).
+*   `version`: Returns firmware version (Returns: `P,VER,0.4.0`).
 
 ## Changelog
+
+**0.4.0**
+*   `dispense` takes a run time in milliseconds instead of a volume. The controller does the volume-to-time conversion.
+*   Removed `smilli` / `gmilli` and the stored ms/ml value. The EEPROM layout of the remaining fields is unchanged, so ID and scale calibration survive the update.
+*   Not compatible with controllers that send `dispense <ml>`: such a controller would run the pump for that many milliseconds.
 
 **0.3.0**
 *   Added `stop` and `status` commands.

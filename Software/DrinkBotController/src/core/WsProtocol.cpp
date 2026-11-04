@@ -282,7 +282,9 @@ ClientMessage parseClientMessage(const std::string& text) {
   } else if (type == "prime" || type == "purge") {
     c.type = type == "prime" ? T::Prime : T::Purge;
     c.pumpId = pumpId();
-    c.number = number("seconds");
+  } else if (type == "pumpStop") {
+    c.type = T::PumpStop;
+    c.pumpId = pumpId();
   } else if (type == "primeAll") {
     c.type = T::PrimeAll;
   } else if (type == "purgeAll") {

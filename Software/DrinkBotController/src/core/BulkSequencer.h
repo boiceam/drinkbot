@@ -12,8 +12,13 @@
 
 namespace drinkbot {
 
-// Single-pump prime/purge (SPEC_v3 §9.6.1) and the sequential
-// Prime All / Purge All (§9.6.2). Like the dispenser, it is a
+// Manual single-pump prime/purge (SPEC_v3 §9.6.1) and the sequential
+// Prime All / Purge All (§9.6.2).
+//
+// A manual prime/purge runs for the pump's longest allowed run until it is
+// stopped. Only one pump runs at a time: starting a manual prime/purge on
+// another pump first stops the running one, and starts the new one only
+// once the stop is acknowledged. Like the dispenser, it is a
 // non-blocking state machine driven by tick().
 class BulkSequencer {
  public:
@@ -21,8 +26,7 @@ class BulkSequencer {
 
   static constexpr uint32_t kGapMs = 500;          // BULK_GAP_MS
   static constexpr float kPurgeFactor = 1.5f;
-  static constexpr float kMinManualSec = 1;
-  static constexpr float kMaxManualSec = 60;
+  static constexpr uint32_t kManualRunMs = kMaxPumpRunMs;
 
   BulkSequencer(TransactionEngine& engine, PumpManager& pumps, SystemState& system, const IClock& clock);
 
@@ -30,7 +34,11 @@ class BulkSequencer {
   BulkPlan plan(BulkOp op) const;
 
   OpResult startAll(BulkOp op);
-  OpResult startSingle(BulkOp op, int pumpId, float seconds);
+  // Manual prime/purge. If another manual run is active it is stopped first.
+  OpResult startSingle(BulkOp op, int pumpId);
+  // Stops the manual prime/purge (and drops any queued switch).
+  OpResult stopSingle();
+  bool singleActive() const { return active() && !bulkOpIsAll(plan_.op); }
 
   void tick();
   void abort(const std::string& reason, bool sendStop);
@@ -39,12 +47,13 @@ class BulkSequencer {
   void setProgressHandler(ProgressHandler handler) { onProgress_ = std::move(handler); }
 
  private:
-  enum class Phase : uint8_t { Idle, Command, Running, Gap };
+  enum class Phase : uint8_t { Idle, Command, Running, Gap, Stopping };
 
   OpResult begin(BulkPlan plan);
   void nextStep();
   void stepFinished();
   void complete();
+  void stopCurrent();
   void fail(ErrorCode code, const std::string& message);
   void emit(BulkProgress::Status status, const std::string& reason = "");
   const BulkStep& step() const { return plan_.steps[stepIndex_]; }
@@ -61,6 +70,9 @@ class BulkSequencer {
   BulkPlan plan_;
   size_t stepIndex_ = 0;
   uint32_t gapUntil_ = 0;
+  // Manual run to start once the current one has stopped
+  bool hasPending_ = false;
+  BulkPlan pending_;
 };
 
 }  // namespace drinkbot

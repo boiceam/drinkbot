@@ -251,19 +251,11 @@ std::vector<std::string> SimPumpLink::execute(Pump& p, const std::string& comman
   } else if (cmd == "weight") {
     snprintf(buf, sizeof(buf), "P,WEIGHT,%f", p.weightG);
     out.push_back(buf);
-  } else if (cmd == "smilli" && args > 0) {
-    p.spec.msPerMl = atoi(t[1].c_str());
-  } else if (cmd == "gmilli") {
-    out.push_back("P,MILLI," + std::to_string(p.spec.msPerMl));
   } else if (cmd == "dispense" && args > 0) {
-    float ml = static_cast<float>(atof(t[1].c_str()));
-    if (ml <= 0 || ml > 1000) {
-      ok = false;
-    } else {
-      ok = startMotion(false, static_cast<uint32_t>(ml * p.spec.msPerMl + 0.5f));
-      if (ok && args > 1) {
-        p.led.mode = atoi(t[2].c_str());
-      }
+    // Firmware 0.4.0: dispense <ms> [ledMode]
+    ok = startMotion(false, strtoul(t[1].c_str(), nullptr, 10));
+    if (ok && args > 1) {
+      p.led.mode = atoi(t[2].c_str());
     }
   } else if ((cmd == "prime" || cmd == "purge") && args > 0) {
     ok = startMotion(cmd == "purge", strtoul(t[1].c_str(), nullptr, 10));

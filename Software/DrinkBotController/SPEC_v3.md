@@ -5,7 +5,7 @@
 | **Version** | 3.0 (approved baseline) |
 | **Supersedes** | `SPEC_v2.md`, `SPEC.md` (v1) |
 | **Target hardware** | Seeed Studio XIAO ESP32-S3 |
-| **Companion device** | DrinkBotPump (RP2040), firmware ≥ 0.3.0 (see §6) |
+| **Companion device** | DrinkBotPump (RP2040), firmware ≥ 0.4.0 (see §6) |
 | **Date** | 2026-11-03 |
 
 Requirement keywords: **shall** means mandatory, **may** means optional. Every recommendation in v2 has been approved and is now a **shall**. Items tagged **[A-n]** are approved assumptions (§1.2), and **[D-n]** are design decisions (§1.1).
@@ -17,6 +17,7 @@ Requirement keywords: **shall** means mandatory, **may** means optional. Every r
 | 1 | Initial spec (`SPEC.md`). |
 | 2 | Restructured. Added pump protocol details, pump firmware v0.3.0 changes, config schema, state model, WebSocket protocol, error catalog and acceptance tests. |
 | 3 | All v2 recommendations and assumptions approved. PF-9, PF-10 and the AP captive DNS are now required. Added a per-pump `autoPrimeSec` config value, plus **Prime All** and **Purge All** (§9.6.2). |
+| 3.1 | Manual prime/purge runs until stopped (at most 120 s) with a Stop button, one pump at a time; starting another pump stops the running one first (§9.6.1). Pump firmware 0.4.0: `dispense <ms>` takes a run time, and `smilli`/`gmilli` are removed (PF-11, D-6). |
 
 ---
 
@@ -27,7 +28,7 @@ Requirement keywords: **shall** means mandatory, **may** means optional. Every r
 3. [Hardware](#3-hardware)
 4. [Software Architecture](#4-software-architecture)
 5. [Pump Communication](#5-pump-communication)
-6. [Required DrinkBotPump Firmware Changes (v0.3.0)](#6-required-drinkbotpump-firmware-changes-v030)
+6. [Required DrinkBotPump Firmware Changes (v0.3.0, v0.4.0)](#6-required-drinkbotpump-firmware-changes-v030-v040)
 7. [Configuration](#7-configuration)
 8. [System State Model](#8-system-state-model)
 9. [System Behaviors](#9-system-behaviors)
@@ -57,8 +58,8 @@ There are no open items.
 | D-2 | **USB power:** the bridge pump is **self-powered**. The USB link carries data only (§3.1). |
 | D-3 | **Pump idle LEDs:** **off** when the level is OK. Only low, empty, dispense and prime/purge states light them (§11). |
 | D-4 | **Clearing latched errors without a browser:** hold the `estop` button for **3 s** (§10.1). |
-| D-5 | **Pump firmware:** may be changed. v0.3.0 is required (§6). |
-| D-6 | **Volume to pump time:** push `smilli <msPerMl>`, then `dispense <ml>` (§9.5). |
+| D-5 | **Pump firmware:** may be changed. v0.4.0 is required (§6, PF-11). |
+| D-6 | **Volume to pump time:** the controller converts each pour to a run time (`ml × msPerMl`) and sends `dispense <ms>` (§9.5). The pump stores no flow rate (PF-11). *(Rev 3.1; was `smilli` then `dispense <ml>`.)* |
 | D-7 | **Scale tare:** each scale is tared with its empty container on it, so weight = liquid only. |
 | D-8 | **Bridge pump:** it dispenses too and has its own ID, so it is addressed directly over USB. |
 | D-9 | **Toolchain:** PlatformIO + Arduino-ESP32 core (§4.1). |
@@ -273,7 +274,7 @@ RX:  R,TIMEOUT\n                   (bridge gave up after kBridgeTimeoutMs = 2000
 
 | Command class | Retries | Rationale |
 |---|---|---|
-| Read-only (`version`, `gid`, `weight`, `gmilli`, `status`) | 2 | Safe to repeat. |
+| Read-only (`version`, `gid`, `weight`, `status`) | 2 | Safe to repeat. |
 | LED commands | 1 | Harmless to repeat. |
 | Motion (`dispense`, `prime`, `purge`) | **0 automatic.** On timeout, send `status`: if the pump is running, treat the command as successful; if idle, retry once. | Prevents a double pour. |
 | `stop` | 3 | Must get through. Broadcast is also used (§9.7). |
@@ -283,11 +284,10 @@ RX:  R,TIMEOUT\n                   (bridge gave up after kBridgeTimeoutMs = 2000
 
 | Command | Use |
 |---|---|
-| `version` | Discovery; check the minimum version (≥ 0.3.0). |
+| `version` | Discovery; check the minimum version (≥ 0.4.0). |
 | `gid` | Learn the bridge pump's ID (direct only). |
 | `weight` | Level checks, verification, background polling. |
-| `smilli <ms>` | Push the liquid's ms/ml before each pour. Not persisted on the pump. |
-| `dispense <ml> [ledMode]` | Pour. |
+| `dispense <ms> [ledMode]` | Pour: run forward for `<ms>` (= `ml × msPerMl`, 1–120000). |
 | `prime <ms>` / `purge <ms>` | Prime / purge. |
 | `stop` *(new)* | Abort the pump. |
 | `status` *(new)* | Confirm a pour is done; motion retry logic. |
@@ -296,7 +296,7 @@ RX:  R,TIMEOUT\n                   (bridge gave up after kBridgeTimeoutMs = 2000
 
 ---
 
-## 6. Required DrinkBotPump Firmware Changes (v0.3.0)
+## 6. Required DrinkBotPump Firmware Changes (v0.3.0, v0.4.0)
 
 Gaps found in pump firmware 0.2.0 that this design depends on:
 
@@ -308,10 +308,11 @@ Gaps found in pump firmware 0.2.0 that this design depends on:
 | PF-4 | **Busy rejection**: `dispense`, `prime` and `purge` reply `R,ERR` if the pump is already running. | 0.2.0 silently restarts the timer. |
 | PF-5 | **Bridge forwarding**: send no local `R,OK` after transmitting. Forward **every** `$[...]` response line until one whose payload starts with `R,`. On timeout, write `R,TIMEOUT\n`. | 0.2.0 drops the second response packet (the `R,OK` after `P,...`) and reports nothing on timeout. |
 | PF-6 | **Broadcast address 255**: every pump runs the command and **does not reply**. If `bridge 255 <cmd>` is sent, the bridge pump also runs it locally. Allowed only for `stop` and LED commands. | Gives E-Stop one fast transmission to all pumps. |
-| PF-7 | **Version** `0.3.0`. | The controller enforces this minimum. |
+| PF-7 | **Version** `0.3.0`. | Superseded by PF-11: the controller now requires `0.4.0`. |
 | PF-8 | Production builds keep the USB `Serial` free of log output (Debug Port = Disabled). | Keeps the line protocol clean (the controller ignores stray lines anyway). |
 | PF-9 | **Hardware safety cap**: any motion lasts at most 120 s. | Limits a runaway if the controller crashes mid-prime. |
 | PF-10 | **`sid` range check**: reject 0 and 255 with `R,ERR`. | Reserved values (A-11). |
+| PF-11 *(0.4.0)* | **`dispense <ms> [ledMode]`** takes a run time in ms (1–120000, PF-9) instead of a volume. `smilli`, `gmilli` and the stored ms/ml are removed; the other EEPROM fields keep their layout. Version `0.4.0`, which the controller now requires. Supersedes PF-3's ml parsing. | The controller owns the calibration (`msPerMl` in config), so the pump needs no flow-rate state. An older pump would read the run time as millilitres, so it must be refused. |
 
 ---
 
@@ -358,8 +359,8 @@ Gaps found in pump firmware 0.2.0 that this design depends on:
   "defaults": {
     "volumeMl": 250,                   // active drink size at boot
     "recipeId": "margarita",           // active recipe at boot ("" = none)
-    "primeSec": 5,
-    "purgeSec": 10
+    "primeSec": 5,                     // auto prime for a pump added in the web UI (and v1 migration)
+    "purgeSec": 10                     // unused since rev 3.1; kept so existing configs stay valid
   },
 
   "ui": {
@@ -370,7 +371,7 @@ Gaps found in pump firmware 0.2.0 that this design depends on:
     {
       "pumpId": 1,                     // 1-254, unique; the pump's bus address
       "liquid": "Tequila",             // unique (case-insensitive); "" = unloaded
-      "msPerMl": 95,                   // 1-65535, pushed via smilli before each pour
+      "msPerMl": 95,                   // 1-65535, controller converts ml to dispense run time
       "densityGPerMl": 0.95,           // grams per ml; level_ml = weight_g / density
       "color": [255, 160, 0],          // RGB used for this liquid's LEDs
       "autoPrimeSec": 4.0              // Prime All runs this long; Purge All runs 1.5x (0 = skip)
@@ -489,7 +490,7 @@ any --USB lost--> ERROR (E_USB_LOST)
 1. Direct `version`. If it fails, raise `E_BRIDGE_UNRESPONSIVE` (blocking). Direct `gid` returns `bridgeId`.
 2. For each configured pump: if `pumpId == bridgeId`, use the direct path; otherwise use bridged. Send `version`.
    - No reply: mark the pump `present=false` and raise `E_PUMP_MISSING(pumpId)` (degraded).
-   - Version < 0.3.0: raise `E_PUMP_FW(pumpId)` (degraded; that pump can't dispense).
+   - Version < 0.4.0: raise `E_PUMP_FW(pumpId)` (degraded; that pump can't dispense).
 3. Read the initial `weight` of every present pump.
 4. If `bridgeId` isn't in the configured pump list, log WARNING. The bridge pump still works as a relay.
 5. Send `ledtime 0` before setting idle LEDs. This cancels the pump's 5 s boot-animation timer, which would otherwise turn the LEDs off.
@@ -510,7 +511,7 @@ any --USB lost--> ERROR (E_USB_LOST)
 1. The state allows a dispense (not DISPENSING or MANUAL, and no blocking error).
 2. The recipe exists and `volumeMl` is in range.
 3. Compute `ml_i = volumeMl × parts_i / Σparts`, rounded to 0.1 ml.
-4. For each ingredient: a pump with a matching liquid exists, is present, and is on firmware ≥ 0.3.0.
+4. For each ingredient: a pump with a matching liquid exists, is present, and is on firmware ≥ 0.4.0. Each pour's run time (`ml × msPerMl`) is at most 120 s (PF-9).
 5. Refresh `weight` for each pump involved, then check `levelMl − ml_i ≥ actualEmptyMl`. If a liquid appears twice in a recipe, sum its amounts.
 
 **Sequence** (sort by `order` ascending; ties keep list order):
@@ -519,10 +520,9 @@ any --USB lost--> ERROR (E_USB_LOST)
 for each step i:
     broadcast dispenseProgress(step i, STARTING)
     w0 = weight(pump)
-    smilli(pump, msPerMl)
+    expectedMs = round(msPerMl * ml_i)
     ledtime 0 ; ledcolor <liquid color> ; ledchase 50 4
-    dispense(pump, ml_i, 3)                 // ledMode 3 = loop chase while pumping
-    expectedMs = msPerMl * ml_i
+    dispense(pump, expectedMs, 3)           // run time in ms; ledMode 3 = loop chase while pumping
     wait expectedMs + 300 ms (abortable, polling status every 250 ms)
     poll status until IDLE, max expectedMs + DISPENSE_OVERRUN_MS (5000)
         -> overrun: stop(pump), abort with E_DISPENSE_TIMEOUT
@@ -542,8 +542,10 @@ broadcast dispenseProgress(COMPLETE, totals)
 
 #### 9.6.1 Single pump
 
-- Prime: `prime <sec×1000>` (forward). Purge: `purge <sec×1000>` (reverse). Allowed range is 1–60 s. The web fields default to `defaults.primeSec` (5) and `defaults.purgeSec` (10), as v1 required.
-- One pump at a time, in state MANUAL. E-Stop can abort it.
+- Prime: `prime 120000` (forward). Purge: `purge 120000` (reverse). A manual run has no duration field: it runs for the pump's longest allowed run (`MANUAL_RUN_MS` = 120 s, PF-9) unless it is stopped first.
+- **Stop:** `pumpStop {pumpId}` sends `stop` to the running pump; once it is acknowledged the pump's idle state is restored and the run reports `DONE` (reason `stopped`) then `COMPLETE`.
+- **One pump at a time**, in state MANUAL. A prime or purge request for any pump while a manual run is active is **not** rejected: the running pump is stopped first, and the new run starts only after that `stop` is acknowledged. If the stop fails, `E_PUMP_COMM` is raised and the new run is not started. This also applies to the same pump in the other direction.
+- Prime/purge requests during a dispense, Prime All, Purge All or maintenance command are rejected with `BUSY`; `pumpStop` during those is rejected with `BUSY` too (use E-Stop). E-Stop aborts a manual run.
 - While running, the pump's LEDs show its liquid color in mode 4 (bounce). After it finishes, the idle state is restored.
 - Prime/purge **skip** level checks, but a WARNING is logged if the pump is EMPTY.
 - Completion is confirmed the same way as a dispense: wait the run time + 300 ms, then poll `status` until IDLE, for at most `DISPENSE_OVERRUN_MS` more.
@@ -559,7 +561,7 @@ These run one pump at a time, in sequence, using each pump's `autoPrimeSec`:
 
 **Which pumps:**
 - Every configured pump with `autoPrimeSec > 0`, in ascending `pumpId` order.
-- Pumps that are missing or on firmware < 0.3.0 are **skipped**, with a WARN log line and a `SKIPPED` progress entry. The rest of the sequence continues.
+- Pumps that are missing or on firmware < 0.4.0 are **skipped**, with a WARN log line and a `SKIPPED` progress entry. The rest of the sequence continues.
 - Pumps with `autoPrimeSec = 0` are left out and not listed.
 - If no pumps qualify, the request is rejected with `PRECHECK_FAILED`.
 
@@ -728,7 +730,7 @@ OTA validates the image header (ESP32-S3 chip ID) before committing. The bootloa
 | `log` | `{t, level, tag, msg}` | Streaming |
 | `logHistory` | `{lines:[{t, level, tag, msg}...]}` | On connect |
 | `dispenseProgress` | `{recipeId, volumeMl, step, steps, liquid, pumpId, targetMl, actualMl?, status:"STARTING"\|"DONE"\|"COMPLETE"\|"ABORTED", reason?}` | During a dispense |
-| `bulkProgress` | `{op:"primeAll"\|"purgeAll", step, steps, pumpId?, liquid?, durationMs?, estimatedTotalMs?, status:"STARTING"\|"RUNNING"\|"DONE"\|"SKIPPED"\|"COMPLETE"\|"ABORTED", reason?}` | During Prime All / Purge All |
+| `bulkProgress` | `{op:"primeAll"\|"purgeAll"\|"prime"\|"purge", step, steps, pumpId?, liquid?, durationMs?, estimatedTotalMs?, status:"STARTING"\|"RUNNING"\|"DONE"\|"SKIPPED"\|"COMPLETE"\|"ABORTED", reason?}` | During Prime All / Purge All, and a manual prime/purge (one step; a stopped run ends `DONE` with reason `stopped`) |
 | `ota` | `{percent, status:"WRITING"\|"DONE"\|"FAILED", message?}` | During OTA |
 | `ack` | `{reqId, data?}` | After a successful request |
 | `error` | `{reqId?, code, message, details?}` | Request failed / was rejected |
@@ -742,7 +744,8 @@ OTA validates the image header (ESP32-S3 chip ID) before committing. The bootloa
 | `setRecipe` | `{recipeId}` | |
 | `setVolume` | `{volumeMl}` | |
 | `dispense` | `{recipeId?, volumeMl?}` | Defaults to the active values |
-| `prime` / `purge` | `{pumpId, seconds}` | 1–60 |
+| `prime` / `purge` | `{pumpId}` | Runs until `pumpStop` (at most 120 s). Stops any other manual run first (§9.6.1). |
+| `pumpStop` | `{pumpId}` | Stops the manual prime/purge |
 | `primeAll` | — | Sequential prime for each pump's `autoPrimeSec` (§9.6.2) |
 | `purgeAll` | — | Sequential purge for each pump's `1.5 × autoPrimeSec` (§9.6.2) |
 | `estop` | — | Highest priority |
@@ -803,7 +806,7 @@ Error `code`s: `BUSY`, `INVALID`, `NOT_FOUND`, `PRECHECK_FAILED`, `PUMP_TIMEOUT`
 - **Pump cards** (one per configured pump):
   - Pump ID (plus a "bridge" badge), liquid name, firmware version, status (Present/Missing/FW too old/Busy), weight in g, and level in ml with a bar that has threshold markers.
   - A level badge (OK/LOW/EMPTY), and an LED-strip preview (a row of 20 dots animated for modes 1–4 in the tracked color).
-  - **Prime** and **Purge** buttons with a seconds field (default 5 / 10).
+  - **Prime** and **Purge** buttons. While that pump is priming, the Prime button becomes **■ Stop prime** (likewise for purge) and an elapsed counter shows "n / 120 s". The other cards' buttons stay enabled; pressing one stops the running pump first (§9.6.1).
   - The auto prime time, shown as "Auto prime: 4.0 s / purge 6.0 s", or "Auto prime: off" when it is 0.
 - **Prime All** and **Purge All** buttons in a bar above the pump cards:
   - Both are disabled unless the state is READY or degraded ERROR and at least one pump qualifies (§9.6.2).
@@ -851,7 +854,7 @@ An editable table with columns pump ID, liquid, ms/ml, density g/ml, color picke
   - IDs are the configured `pumpId`s. If fewer than 8 are configured, more are added with IDs 1–8, skipping IDs already in use.
   - The first configured pump is the "bridge".
 - Each virtual pump models:
-  - firmware version `0.3.0-sim`;
+  - firmware version `0.4.0-sim`;
   - a starting weight of 750 g × density;
   - `dispense` / `prime` lowering the weight over time at `1/msPerMl` ml/ms (purge raises it);
   - `status`, the LED state, and `tare`/`cal`/`sid` stubs;
@@ -868,7 +871,7 @@ An editable table with columns pump ID, liquid, ms/ml, density g/ml, color picke
 | `E_USB_LOST` | Blocking | CDC device detached at runtime | Re-enumeration plus successful discovery |
 | `E_BRIDGE_UNRESPONSIVE` | Blocking | Bridge pump doesn't answer `version` | Rescan succeeds |
 | `E_PUMP_MISSING(id)` | Degraded | No answer at discovery, or 3 poll failures | That pump answers |
-| `E_PUMP_FW(id)` | Degraded | Pump version < 0.3.0 | Rescan finds ≥ 0.3.0 |
+| `E_PUMP_FW(id)` | Degraded | Pump version < 0.4.0 | Rescan finds ≥ 0.4.0 |
 | `E_CONFIG` | Degraded | `config.json` invalid; using backup/default | Successful config save |
 | `E_DISPENSE_TIMEOUT(id)` | Latched | Pump still running after expected time + 5 s | Clear Errors |
 | `E_PUMP_COMM(id)` | Latched | Transaction failure during a dispense or manual op | Clear Errors |
@@ -899,6 +902,7 @@ Pre-check failures (insufficient liquid, unknown recipe, liquid not loaded) are 
 | Blink / fast blink | 500/500 ms, 150/150 ms |
 | Prime/purge range (single pump) | 1–60 s |
 | `autoPrimeSec` range | 0–60 s, 0.1 s steps (0 = skip). Purge All runs up to 90 s per pump. |
+| `MANUAL_RUN_MS` | 120000 ms: a manual prime/purge runs this long unless stopped (= pump cap PF-9). |
 | `BULK_GAP_MS` (pause between pumps in Prime/Purge All) | 500 |
 | Volume range (config default) | 10–1000 ml |
 | Max pumps / recipes / ingredients per recipe / networks | 16 / 64 / 16 / 8 |
@@ -927,6 +931,8 @@ Pre-check failures (insufficient liquid, unknown recipe, liquid not loaded) are 
 16. **Prime/Purge All abort:** E-Stop during the second pump stops it within 500 ms, and later pumps don't run. A dispense requested during the sequence is rejected with `BUSY`.
 17. **Schema migration:** a version 1 config loads with `autoPrimeSec` = `defaults.primeSec` on every pump, and is saved as version 2.
 18. **Real hardware:** a direct `version` to the bridge pump and a bridged `version` to every pump succeed, and bridged CRCs verify.
+19. **Manual prime/purge:** Prime on pump A runs until Stop prime is pressed, and ends by itself after 120 s. Pressing Purge on pump B while A is priming stops A before B starts; at no time do both run. Dispense and Prime All are rejected with `BUSY` while a manual run is active.
+20. **Dispense by time:** a pour of `ml` on a pump with `msPerMl` sends `dispense <round(ml × msPerMl)> 3`; no `smilli` is sent. A pour needing more than 120 s is rejected by the precheck.
 
 ---
 

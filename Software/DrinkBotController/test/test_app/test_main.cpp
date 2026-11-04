@@ -187,9 +187,10 @@ void test_dispense_pours_each_ingredient_in_order() {
   TEST_ASSERT_FLOAT_WITHIN(0.1f, 125 * 0.95f, t0 - rig.sim.weight(1));
   TEST_ASSERT_FLOAT_WITHIN(0.1f, 62.5f * 1.05f, s0 - rig.sim.weight(2));
   TEST_ASSERT_FLOAT_WITHIN(0.1f, 62.5f, l0 - rig.sim.weight(4));
-  TEST_ASSERT_EQUAL(1, rig.count("smilli 20"));  // flow rate pushed before the pour
-  TEST_ASSERT_EQUAL(1, rig.count("dispense 125.0 3"));
-  TEST_ASSERT_EQUAL(1, rig.count("bridge 2 dispense 62.5 3"));
+  // Pump firmware 0.4.0: dispense takes the run time (ml x msPerMl 20)
+  TEST_ASSERT_EQUAL(0, rig.countPrefix("smilli") + rig.countPrefix("bridge 2 smilli"));
+  TEST_ASSERT_EQUAL(1, rig.count("dispense 2500 3"));
+  TEST_ASSERT_EQUAL(1, rig.count("bridge 2 dispense 1250 3"));
   TEST_ASSERT_EQUAL(0, rig.app.system().errors().size());
 }
 
@@ -299,10 +300,7 @@ void test_busy_during_sequence() {
 void test_overrun_latches_dispense_timeout() {
   Rig rig;
   rig.sim.setStuck(4, true);
-  Command c = make(Command::Type::Prime);
-  c.pumpId = 4;
-  c.number = 1;
-  TEST_ASSERT_TRUE(rig.send(c).ok);
+  TEST_ASSERT_TRUE(rig.send(make(Command::Type::PrimeAll)).ok);  // pump 4 primes for 2 s
   rig.runUntilIdle(20000);
   rig.run(200);  // let the queued stop go out
   TEST_ASSERT_TRUE(rig.hasError(ErrorCode::DispenseTimeout));
@@ -320,21 +318,20 @@ void test_estop_never_resends_unanswered_motion() {
   Rig rig;
   Command c = make(Command::Type::Prime);
   c.pumpId = 2;
-  c.number = 3;
   rig.app.post(c);
   // Let the LED commands through, then lose the prime itself without running it
   for (int i = 0; i < 2000 && rig.count("bridge 2 ledmode 4 255") == 0; i++) {
     rig.run(1);
   }
   rig.sim.ignoreNextCommand(2);
-  for (int i = 0; i < 2000 && rig.count("bridge 2 prime 3000") == 0; i++) {
+  for (int i = 0; i < 2000 && rig.count("bridge 2 prime 120000") == 0; i++) {
     rig.run(1);
   }
-  TEST_ASSERT_EQUAL(1, rig.count("bridge 2 prime 3000"));
+  TEST_ASSERT_EQUAL(1, rig.count("bridge 2 prime 120000"));
   rig.run(1000);  // engine is still waiting for the bridge's R,TIMEOUT
   rig.app.post(make(Command::Type::Estop));
   rig.run(10000);
-  TEST_ASSERT_EQUAL(1, rig.count("bridge 2 prime 3000"));
+  TEST_ASSERT_EQUAL(1, rig.count("bridge 2 prime 120000"));
   TEST_ASSERT_FALSE(rig.sim.running(2));
 }
 
@@ -385,10 +382,10 @@ void test_maintenance_raw_and_set_id() {
   Rig rig;
   Command raw = make(Command::Type::PumpRaw);
   raw.pumpId = 4;
-  raw.text = "gmilli";
+  raw.text = "gid";
   CommandResult r = rig.send(raw);
   TEST_ASSERT_TRUE(r.ok);
-  TEST_ASSERT_EQUAL_STRING("P,MILLI,20", r.lines[0].c_str());
+  TEST_ASSERT_EQUAL_STRING("P,ID,4", r.lines[0].c_str());
 
   Command id = make(Command::Type::PumpSetId);
   id.pumpId = 4;
@@ -413,6 +410,110 @@ void test_reboot_requires_force_while_busy() {
   TEST_ASSERT_FALSE(rig.app.system().busy());
 }
 
+Command manual(Command::Type type, int pumpId) {
+  Command c = make(type);
+  c.pumpId = pumpId;
+  return c;
+}
+
+void test_manual_prime_runs_until_stopped() {
+  Rig rig;
+  TEST_ASSERT_TRUE(rig.send(manual(Command::Type::Prime, 4)).ok);
+  rig.run(1000);
+  TEST_ASSERT_EQUAL(1, rig.count("bridge 4 prime 120000"));  // the pump's longest allowed run
+  TEST_ASSERT_TRUE(rig.sim.running(4));
+  rig.run(30000);
+  TEST_ASSERT_TRUE(rig.sim.running(4));
+  TEST_ASSERT_TRUE(rig.app.system().busy());
+
+  TEST_ASSERT_TRUE(rig.send(manual(Command::Type::PumpStop, 4)).ok);
+  rig.run(500);
+  TEST_ASSERT_FALSE(rig.sim.running(4));
+  TEST_ASSERT_FALSE(rig.app.system().busy());
+  TEST_ASSERT_TRUE(rig.rec.bulk.back().status == BulkProgress::Status::Complete);
+  TEST_ASSERT_EQUAL(0, static_cast<int>(rig.app.system().errors().size()));
+}
+
+void test_manual_prime_ends_at_max_run_time() {
+  Rig rig;
+  TEST_ASSERT_TRUE(rig.send(manual(Command::Type::Purge, 2)).ok);
+  rig.run(1000);
+  TEST_ASSERT_TRUE(rig.sim.reversing(2));
+  rig.runUntilIdle(130000);
+  TEST_ASSERT_FALSE(rig.app.system().busy());
+  TEST_ASSERT_FALSE(rig.sim.running(2));
+  TEST_ASSERT_TRUE(rig.rec.bulk.back().status == BulkProgress::Status::Complete);
+  TEST_ASSERT_EQUAL(0, static_cast<int>(rig.app.system().errors().size()));
+}
+
+void test_manual_switch_stops_previous_pump_first() {
+  Rig rig;
+  TEST_ASSERT_TRUE(rig.send(manual(Command::Type::Prime, 1)).ok);
+  rig.run(1000);
+  TEST_ASSERT_TRUE(rig.sim.running(1));
+
+  rig.app.post(manual(Command::Type::Purge, 4));
+  bool overlap = false;
+  for (int i = 0; i < 3000; i++) {
+    rig.run(1);
+    overlap |= rig.sim.running(1) && rig.sim.running(4);
+  }
+  TEST_ASSERT_FALSE_MESSAGE(overlap, "two pumps ran at once");
+  TEST_ASSERT_FALSE(rig.sim.running(1));
+  TEST_ASSERT_TRUE(rig.sim.reversing(4));
+
+  const auto& r = rig.sim.received();
+  auto stop1 = std::find(r.begin(), r.end(), "stop");  // pump 1 is the bridge: direct
+  auto purge4 = std::find(r.begin(), r.end(), "bridge 4 purge 120000");
+  TEST_ASSERT_TRUE(stop1 != r.end() && purge4 != r.end());
+  TEST_ASSERT_TRUE(stop1 < purge4);
+
+  // Same pump, other direction: also stop then start
+  rig.app.post(manual(Command::Type::Prime, 4));
+  rig.run(3000);
+  TEST_ASSERT_TRUE(rig.sim.running(4));
+  TEST_ASSERT_FALSE(rig.sim.reversing(4));
+  TEST_ASSERT_TRUE(rig.count("bridge 4 stop") >= 1);
+
+  TEST_ASSERT_TRUE(rig.send(manual(Command::Type::PumpStop, 4)).ok);
+  rig.run(500);
+  TEST_ASSERT_FALSE(rig.sim.running(4));
+  TEST_ASSERT_FALSE(rig.app.system().busy());
+  TEST_ASSERT_EQUAL(0, static_cast<int>(rig.app.system().errors().size()));
+}
+
+void test_manual_prime_busy_during_prime_all() {
+  Rig rig;
+  TEST_ASSERT_TRUE(rig.send(make(Command::Type::PrimeAll)).ok);
+  rig.run(500);
+  TEST_ASSERT_EQUAL_STRING("BUSY", rig.send(manual(Command::Type::Prime, 2)).code.c_str());
+  TEST_ASSERT_EQUAL_STRING("BUSY", rig.send(manual(Command::Type::PumpStop, 1)).code.c_str());
+  rig.runUntilIdle();
+  TEST_ASSERT_EQUAL(0, rig.countPrefix("bridge 2 prime"));
+}
+
+void test_dispense_rejects_run_over_pump_limit() {
+  Rig rig;
+  // Paloma at 1000 ml: 750 ml of Grapefruit Soda is not loaded, so use Margarita at
+  // a slow flow rate: 500 ml Tequila x 300 ms/ml = 150 s, over the 120 s limit
+  JsonDocument doc;
+  deserializeJson(doc, kConfig);
+  doc["pumps"][0]["msPerMl"] = 300;
+  doc["dispense"]["maxVolumeMl"] = 1000;
+  std::string json;
+  serializeJson(doc, json);
+  Command save = make(Command::Type::SaveConfig);
+  save.text = json;
+  TEST_ASSERT_TRUE(rig.send(save).ok);
+  Command d = make(Command::Type::Dispense);
+  d.text = "margarita";
+  d.number = 1000;
+  CommandResult r = rig.send(d);
+  TEST_ASSERT_EQUAL_STRING("PRECHECK_FAILED", r.code.c_str());
+  TEST_ASSERT_TRUE(r.message.find("120 s") != std::string::npos);
+  TEST_ASSERT_EQUAL(0, rig.countPrefix("dispense"));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_boots_ready_with_defaults);
@@ -426,6 +527,11 @@ int main() {
   RUN_TEST(test_busy_during_sequence);
   RUN_TEST(test_overrun_latches_dispense_timeout);
   RUN_TEST(test_estop_never_resends_unanswered_motion);
+  RUN_TEST(test_manual_prime_runs_until_stopped);
+  RUN_TEST(test_manual_prime_ends_at_max_run_time);
+  RUN_TEST(test_manual_switch_stops_previous_pump_first);
+  RUN_TEST(test_manual_prime_busy_during_prime_all);
+  RUN_TEST(test_dispense_rejects_run_over_pump_limit);
   RUN_TEST(test_save_config_validates_and_applies);
   RUN_TEST(test_selection_commands);
   RUN_TEST(test_maintenance_raw_and_set_id);

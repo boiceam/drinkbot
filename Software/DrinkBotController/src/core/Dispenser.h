@@ -51,6 +51,8 @@ class Dispenser {
   void fail(ErrorCode code, const std::string& message);
   void emit(DispenseProgress::Status status, const std::string& reason = "");
   const PourStep& step() const { return steps_[stepIndex_]; }
+  // Pump run time for a pour, from the pump's calibrated ms/ml
+  uint32_t runMs(const PourStep& s) const;
 
   TransactionEngine& engine_;
   PumpManager& pumps_;

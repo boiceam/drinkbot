@@ -38,8 +38,9 @@ struct Command {
     SetRecipe,      // text = recipeId
     SetVolume,      // number = ml
     Dispense,       // text = recipeId (optional), number = ml (optional)
-    Prime,          // pumpId, number = seconds
-    Purge,          // pumpId, number = seconds
+    Prime,          // pumpId; runs until PumpStop (at most 120 s), stopping any other manual run first
+    Purge,          // pumpId; as Prime, in reverse
+    PumpStop,       // pumpId; stops the manual prime/purge
     PrimeAll,
     PurgeAll,
     Estop,

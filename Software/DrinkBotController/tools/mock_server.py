@@ -42,6 +42,7 @@ FW_VERSION = "0.1.0-mock"
 BUILD_DATE = time.strftime("%Y-%m-%d %H:%M")
 LEVELS = ["ERROR", "WARN", "INFO", "DEBUG", "VERBOSE"]
 BULK_GAP_MS = 500
+MANUAL_RUN_MS = 120000  # manual prime/purge runs for the pump's longest allowed run (kMaxMotionMs)
 SEVERITY = {
     "E_USB_LOST": "blocking", "E_BRIDGE_UNRESPONSIVE": "blocking",
     "E_PUMP_MISSING": "degraded", "E_PUMP_FW": "degraded", "E_CONFIG": "degraded",
@@ -351,6 +352,10 @@ class Abort(Exception):
     pass
 
 
+class Stopped(Exception):
+    """A manual prime/purge was stopped by the user (or replaced by another)."""
+
+
 class Sim(object):
     def __init__(self):
         self.lock = threading.RLock()
@@ -363,6 +368,9 @@ class Sim(object):
         self.logs = []
         self.op_thread = None
         self.abort = threading.Event()
+        self.manual_stop = threading.Event()
+        self.manual_pid = None    # pump running a manual prime/purge
+        self.manual_next = None   # (pid, direction) to start once it has stopped
         self.active_recipe = self.config["defaults"]["recipeId"]
         self.active_volume = self.config["defaults"]["volumeMl"]
         self.pumps = {}
@@ -411,7 +419,7 @@ class Sim(object):
             dens = pc["densityGPerMl"] if pc else 1.0
             prev = old.get(pid)
             self.pumps[pid] = {
-                "pumpId": pid, "fwVersion": "0.3.0-sim", "isBridge": idx == 0,
+                "pumpId": pid, "fwVersion": "0.4.0-sim", "isBridge": idx == 0,
                 "weightG": prev["weightG"] if prev else round(750 * dens * random.uniform(0.3, 1.0), 1),
                 "activity": "IDLE", "motion": None,
                 "led": {"r": 0, "g": 0, "b": 0, "mode": 1, "brightness": 0},
@@ -598,11 +606,13 @@ class Sim(object):
                     self.broadcast(self.pumps_msg())
 
     # ----- pump primitives (simulate the PumpLink)
-    def sleep(self, ms):
+    def sleep(self, ms, stop=None):
         end = time.time() + ms / 1000.0 / SPEED
         while time.time() < end:
             if self.abort.is_set():
                 raise Abort("E-Stop")
+            if stop is not None and stop.is_set():
+                raise Stopped()
             time.sleep(0.02)
 
     def pump_cmd(self, pid, cmd):
@@ -615,10 +625,11 @@ class Sim(object):
             raise RuntimeError("PUMP_TIMEOUT:pump %d timed out on '%s'" % (pid, cmd))
         self.log("VERBOSE", "PUMP", "TX %d: %s" % (pid, cmd))
 
-    def run_motion(self, pid, direction, ms, activity, ledmode):
+    def run_motion(self, pid, direction, ms, activity, ledmode, stop=None):
         pc = self.pump_cfg(pid)
         col = pc["color"] if pc else [255, 255, 255]
-        self.pump_cmd(pid, "%s %d" % ("prime" if direction == "FWD" else "purge", ms))
+        verb = "dispense" if activity == "DISPENSING" else ("prime" if direction == "FWD" else "purge")
+        self.pump_cmd(pid, "%s %d" % (verb, ms))
         p = self.pumps[pid]
         with self.lock:
             p["activity"] = activity
@@ -628,10 +639,10 @@ class Sim(object):
             p["motion"] = {"dir": direction, "remaining": ms, "overrun": overrun}
             self.pumps_dirty = True
         try:
-            self.sleep(ms + 300)
+            self.sleep(ms + 300, stop)
             waited = 0
             while p["motion"]:
-                self.sleep(250)
+                self.sleep(250, stop)
                 waited += 250
                 if waited > 5000:
                     with self.lock:
@@ -728,25 +739,75 @@ class Sim(object):
                 self.log("WARN", "DISP", "Dispense aborted at step %d/%d: %s" % (i, n, reason))
         self.start_op("DISPENSING", run)
 
-    def do_single(self, pid, sec, direction):
+    def do_single(self, pid, direction):
+        """Manual prime/purge: runs until stopped (at most MANUAL_RUN_MS). Only one pump runs
+        at a time: a request for another pump stops the running one first."""
         if not self.pump_cfg(pid):
             raise ReqError("NOT_FOUND", "Pump %d is not configured" % pid)
         if not self.present(pid):
             raise ReqError("PRECHECK_FAILED", "Pump %d is missing" % pid)
-        if self.level_state(pid) == "EMPTY":
-            self.log("WARN", "PUMP", "Pump %d is EMPTY" % pid)
-        what = "Prime" if direction == "FWD" else "Purge"
+        with self.lock:
+            if self.manual_pid is not None:
+                self.log("INFO", "PUMP", "Stopping pump %d before %s pump %d"
+                         % (self.manual_pid, "priming" if direction == "FWD" else "purging", pid))
+                self.manual_next = (pid, direction)
+                self.manual_stop.set()
+                return
+            self.manual_pid = pid
+            self.manual_next = None
+            self.manual_stop.clear()
 
         def run():
-            self.log("INFO", "PUMP", "%s pump %d for %g s" % (what, pid, sec))
+            job = (pid, direction)
             try:
-                self.run_motion(pid, direction, int(sec * 1000), "PRIMING" if direction == "FWD" else "PURGING", 4)
-                self.log("INFO", "PUMP", "%s pump %d done" % (what, pid))
-            except RuntimeError as ex:
-                if not any(e["code"] == "E_DISPENSE_TIMEOUT" and e["pumpId"] == pid for e in self.errors):
-                    self.raise_error("E_PUMP_COMM", pid, str(ex).split(":", 1)[-1])
-                raise
+                while job:
+                    self.run_single(*job)
+                    with self.lock:
+                        job, self.manual_next = self.manual_next, None
+                        self.manual_stop.clear()
+                        self.manual_pid = job[0] if job else None
+            finally:
+                with self.lock:
+                    self.manual_pid = None
+                    self.manual_next = None
         self.start_op("MANUAL", run)
+
+    def stop_single(self):
+        with self.lock:
+            self.manual_next = None
+            self.manual_stop.set()
+
+    def run_single(self, pid, direction):
+        op = "prime" if direction == "FWD" else "purge"
+        what = "Priming" if direction == "FWD" else "Purging"
+        pc = self.pump_cfg(pid) or {"liquid": ""}
+        base = {"type": "bulkProgress", "op": op, "step": 1, "steps": 1, "pumpId": pid,
+                "liquid": pc["liquid"], "durationMs": MANUAL_RUN_MS}
+        self.broadcast({"type": "bulkProgress", "op": op, "step": 0, "steps": 1,
+                        "estimatedTotalMs": MANUAL_RUN_MS + 300, "status": "STARTING"})
+        if self.level_state(pid) == "EMPTY":
+            self.log("WARN", "PUMP", "Pump %d is EMPTY" % pid)
+        self.log("INFO", "PUMP", "%s pump %d (%s) until stopped (at most %d s)"
+                 % (what, pid, pc["liquid"], MANUAL_RUN_MS // 1000))
+        self.broadcast(dict(base, status="RUNNING"))
+        try:
+            self.run_motion(pid, direction, MANUAL_RUN_MS, "PRIMING" if direction == "FWD" else "PURGING", 4,
+                            stop=self.manual_stop)
+            self.broadcast(dict(base, status="DONE"))
+        except Stopped:
+            self.pump_cmd(pid, "stop")
+            self.log("INFO", "PUMP", "Pump %d stopped" % pid)
+            self.broadcast(dict(base, status="DONE", reason="stopped"))
+        except (Abort, RuntimeError) as ex:
+            if isinstance(ex, RuntimeError) and not any(
+                    e["code"] == "E_DISPENSE_TIMEOUT" and e["pumpId"] == pid for e in self.errors):
+                self.raise_error("E_PUMP_COMM", pid, str(ex).split(":", 1)[-1])
+            reason = "E-Stop" if isinstance(ex, Abort) else str(ex).split(":", 1)[-1]
+            self.broadcast(dict(base, status="ABORTED", reason=reason))
+            with self.lock:
+                self.manual_next = None
+            raise
+        self.broadcast({"type": "bulkProgress", "op": op, "step": 1, "steps": 1, "status": "COMPLETE"})
 
     def do_bulk(self, op):
         mult = 1.0 if op == "primeAll" else 1.5
@@ -888,11 +949,19 @@ class Sim(object):
                 raise ReqError("PRECHECK_FAILED", "Blocked by active errors; clear errors first")
             self.do_dispense(msg.get("recipeId") or self.active_recipe, msg.get("volumeMl") or self.active_volume)
         elif t in ("prime", "purge"):
-            need_idle()
-            s = msg.get("seconds")
-            if not _num(s) or not 1 <= s <= 60:
-                raise ReqError("INVALID", "seconds must be 1-60")
-            self.do_single(pump_id(), s, "FWD" if t == "prime" else "REV")
+            if self.manual_pid is None:  # a manual run may replace another manual run
+                need_idle()
+            if self.blocking():
+                raise ReqError("PRECHECK_FAILED", "Blocked by active errors")
+            self.do_single(pump_id(), "FWD" if t == "prime" else "REV")
+        elif t == "pumpStop":
+            pid = pump_id()
+            if self.manual_pid is not None:
+                self.stop_single()
+            elif busy:
+                raise ReqError("BUSY", "Use E-Stop to stop a dispense or Prime/Purge All")
+            else:
+                self.pump_cmd(pid, "stop")
         elif t in ("primeAll", "purgeAll"):
             need_idle()
             if self.blocking():
@@ -984,14 +1053,12 @@ class Sim(object):
             word = cmd.split()[0]
             p = self.pumps[pid]
             lines = {
-                "version": ["P,VERSION,0.3.0-sim", "R,OK"],
+                "version": ["P,VER,0.4.0-sim", "R,OK"],
                 "gid": ["P,ID,%d" % pid, "R,OK"],
                 "weight": ["P,WEIGHT,%.6f" % p["weightG"], "R,OK"],
                 "status": ["P,STATUS,%s,%d" % (p["motion"]["dir"] if p["motion"] else "IDLE",
                                                 max(0, p["motion"]["remaining"]) if p["motion"] else 0), "R,OK"],
-                "gmilli": ["P,MILLI,%d" % (self.pump_cfg(pid) or {"msPerMl": 100})["msPerMl"], "R,OK"],
-            }.get(word, ["R,OK"] if word in ("ledcolor", "ledmode", "ledfade", "ledchase", "ledtime", "stop",
-                                             "smilli") else ["R,INVLD"])
+            }.get(word, ["R,OK"] if word in ("ledcolor", "ledmode", "ledfade", "ledchase", "ledtime", "stop") else ["R,INVLD"])
             self.log("INFO", "PUMP", "Raw '%s' to pump %d -> %s" % (cmd, pid, lines[-1]))
             return {"lines": lines}
         elif t == "simFault":

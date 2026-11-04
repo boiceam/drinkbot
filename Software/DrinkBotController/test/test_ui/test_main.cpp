@@ -200,9 +200,7 @@ void test_estop_hold_clears_latched_errors() {
   // A pump that never reports idle overruns and latches E_DISPENSE_TIMEOUT
   rig.sim.setStuck(1, true);
   Command prime;
-  prime.type = Command::Type::Prime;
-  prime.pumpId = 1;
-  prime.number = 1;
+  prime.type = Command::Type::PrimeAll;  // pump 1 auto primes for 1 s
   rig.app.post(prime);
   rig.run(8000);
   rig.sim.setStuck(1, false);

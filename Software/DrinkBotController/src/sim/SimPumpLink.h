@@ -11,7 +11,7 @@
 
 namespace drinkbot {
 
-// Simulated bridge pump plus RS485 bus of DrinkBotPump 0.3.0 nodes
+// Simulated bridge pump plus RS485 bus of DrinkBotPump 0.4.0 nodes
 // (SPEC_v3 §16). Speaks the same line protocol as the real firmware,
 // including bridged $[..|crc] replies, R,TIMEOUT and broadcast 255.
 class SimPumpLink : public IPumpTransport {
@@ -26,7 +26,7 @@ class SimPumpLink : public IPumpTransport {
   struct PumpSpec {
     int id = 0;
     float densityGPerMl = 1.0f;
-    int msPerMl = 100;
+    int msPerMl = 100;  // true flow rate, used to move liquid while running
   };
 
   struct LedState {
@@ -73,7 +73,7 @@ class SimPumpLink : public IPumpTransport {
   struct Pump {
     PumpSpec spec;
     int id = 0;
-    std::string version = "0.3.0-sim";
+    std::string version = "0.4.0-sim";
     float weightG = 0;
     bool missing = false;
     int dropResponses = 0;
