@@ -1,0 +1,966 @@
+/*
+ * DrinkBot Pump Controller
+ * 
+ * Hardware Target: Raspberry Pi Pico (RP2040)
+ * IDE Requirement: Arduino IDE 2.3.10 or greater
+ * 
+ * Required Libraries:
+ *  - HX711 (by Bogdan Necula)
+ *  - Adafruit NeoPixel (by Adafruit)
+ *  - ArduinoLog (by Thijs Elenbaas)
+ * 
+ * Debug Building:
+ * Debug features (such as blocking wait for USB Serial on boot and extra bridge packet logging) 
+ * are controlled via the Arduino IDE's built-in menus rather than manual macros.
+ *  - To Enable Debugging: Go to Tools -> Debug Port -> "Serial" (or your preferred port).
+ *  - To Disable Debugging (Production): Go to Tools -> Debug Port -> "Disabled". 
+ * When a debug port is selected, the IDE defines `DEBUG_RP2040_PORT`, which this code 
+ * uses to conditionally compile debug-only features.
+ */
+
+#include "HX711.h"
+#include <EEPROM.h>
+#include <ArduinoLog.h>
+#include <Adafruit_NeoPixel.h>
+
+// --- Global Constants ---
+constexpr uint32_t kLedBootAnimationTimeMs = 5000;
+constexpr uint32_t kCommBusBaudRate = 115200;
+constexpr uint32_t kBridgeTimeoutMs = 2000;
+constexpr uint32_t kScaleMeasurementWaitTimeMs = 200;
+constexpr uint8_t  kScaleReadingsPerMeasurement = 1;
+constexpr uint32_t kScaleActionWaitTimeMs = 2000;
+constexpr uint8_t  kScaleCalibrationReadings = 20;
+constexpr uint8_t  kScaleWaitDelayMs = 5;
+constexpr uint32_t kMaxMotionMs = 120000;
+constexpr float    kMaxDispenseMl = 1000.0;
+constexpr uint8_t  kBroadcastAddress = 255;
+
+struct DeviceConfig {
+  uint8_t id;
+  float scaleFactor;
+  int32_t scaleOffset;
+  uint16_t pumpMilliliterDurationMs;
+};
+
+// Constant parameters
+constexpr int kMcuUart0TxPin = D0;
+constexpr int kMcuUart0RxPin = D1;
+constexpr int kPlcDirPin = D2;
+constexpr int kPumpIn1Pin = D4;
+constexpr int kPumpIn2Pin = D5;
+constexpr int kGoLedPin = D11;
+constexpr int kScaleDataPin = D15;
+constexpr int kScaleClockPin = D16;
+constexpr int kScaleRatePin = D17;
+constexpr int kMcuClockoutPin = D21;
+constexpr int kLedDataPin = D22;
+constexpr int kMcuUart1TxPin = D24;
+constexpr int kMcuUart1RxPin = D25;
+constexpr int kMcuI2c0SdaPin = D28;
+constexpr int kMcuI2c0SclPin = D29;
+
+constexpr int kBusTransmit = HIGH;
+constexpr int kBusReceive = LOW;
+
+constexpr uint32_t kScaleTaskIntervalMs = 200;
+constexpr uint32_t kUiTaskIntervalMs = 2000;
+constexpr uint32_t kLedTaskIntervalMs = 20;
+
+constexpr uint16_t kInputBufferSize = 128;
+constexpr uint16_t kOutputBufferSize = 512;
+
+constexpr uint8_t kMaxBytesPerCall = 32;
+constexpr uint8_t kMaxTokens = 8;
+constexpr uint8_t kMaxCommandLength = 15;
+
+constexpr uint16_t kConfigEepromAddress = 0;
+const char* kFirmwareVersion = "0.3.0";
+
+constexpr uint8_t kPumpEnabled = 1;
+constexpr uint8_t kPumpDisabled = 0;
+constexpr uint8_t kPumpForward = 0;
+constexpr uint8_t kPumpReverse = 1;
+
+enum CommandSource {
+  SRC_UART,
+  SRC_COMMBUS,
+  SRC_BROADCAST
+};
+
+// Loop Timers
+uint32_t nextScaleTaskTime = 0;
+uint32_t nextUiTaskTime = 0;
+uint32_t nextLedTaskTime = 0;
+
+char uartInputLineBuffer[kInputBufferSize];
+uint8_t uartBufferLocation = 0;
+
+char commBusInputLineBuffer[kInputBufferSize];
+uint8_t commBusBufferLocation = 0;
+
+char outputBuffer[kOutputBufferSize];
+
+volatile float lastScaleReading;
+
+DeviceConfig config;
+HX711 scale;
+
+CommandSource currentCommandSource = SRC_UART;
+bool pendingBridgeResponse = false;
+uint32_t bridgeTimeoutMs = 0;
+
+// --- Pump State ---
+uint32_t pumpStartTime = 0;
+uint32_t pumpDurationMs = 0;
+bool pumpActive = false;
+uint8_t pumpDirection = kPumpForward;
+
+// --- LED Configuration ---
+constexpr uint16_t kNumLeds = 20;
+Adafruit_NeoPixel strip(kNumLeds, kLedDataPin, NEO_GRB + NEO_KHZ800);
+
+uint8_t ledMode = 1;
+uint8_t ledR = 255;
+uint8_t ledG = 0;
+uint8_t ledB = 0;
+uint8_t ledMaxBrightness = 255;
+
+// LED Timer State
+bool ledTimerActive = false;
+uint32_t ledTimerEndTime = 0;
+bool ledStopPending = false;
+
+// Fade Mode (2) State
+uint16_t ledFadeInMs = 1000;
+uint16_t ledOnHoldMs = 500;
+uint16_t ledFadeOutMs = 1000;
+uint16_t ledOffHoldMs = 500;
+uint8_t fadeState = 0; 
+uint32_t fadeStateStartTime = 0;
+
+// Chase Mode (3 & 4) State
+uint16_t ledChaseSpeedMs = 75;
+uint8_t ledChaseGradient = 4;
+int8_t chaseLedIndex = 0;
+int8_t chaseDirection = 1;
+uint32_t lastChaseStepTime = 0;
+
+
+void setup() {
+  Serial.begin(115200);
+
+#if defined(DEBUG_RP2040_PORT)
+  while (!DEBUG_RP2040_PORT) {
+    yield();
+  }
+  Log.begin(LOG_LEVEL_VERBOSE, &DEBUG_RP2040_PORT);
+#else
+  Log.begin(LOG_LEVEL_SILENT, &Serial);
+#endif
+
+  Log.noticeln("SYS - Starting DrinkBot Pump");
+
+  EEPROM.begin(128);
+  loadConfig();
+
+  initUi();
+  initCommBus();
+  initPump();
+  initScale();
+  initLeds();
+}
+
+void loop() {
+  auto currentMillis = millis();
+  
+  if (currentMillis >= nextScaleTaskTime) {
+    nextScaleTaskTime = currentMillis + kScaleTaskIntervalMs;
+    scaleTask();
+  }
+
+  if (currentMillis >= nextUiTaskTime) {
+    nextUiTaskTime = currentMillis + kUiTaskIntervalMs;
+    uiTask();
+  }
+
+  if (currentMillis >= nextLedTaskTime) {
+    nextLedTaskTime = currentMillis + kLedTaskIntervalMs;
+    ledTask();
+  }
+
+  pumpTask();
+
+  if (pendingBridgeResponse) {
+    if (currentMillis > bridgeTimeoutMs) {
+      pendingBridgeResponse = false;
+      Serial.write("R,TIMEOUT\n");
+    }
+  }
+
+  processUartInput();
+  processCommBus();
+  yield();
+}
+
+// --- CRC32 & RS485 Utilities ---
+
+uint32_t calculateCRC32(const char* data, size_t length) {
+  uint32_t crc = 0xFFFFFFFF;
+  for (size_t i = 0; i < length; i++) {
+    char ch = data[i];
+    for (size_t j = 0; j < 8; j++) {
+      uint32_t b = (ch ^ crc) & 1;
+      crc >>= 1;
+      if (b) {
+        crc = crc ^ 0xEDB88320;
+      }
+      ch >>= 1;
+    }
+  }
+  return ~crc;
+}
+
+void sendCommBusResponse(const char* responseText) {
+  char packet[256];
+  char crcData[256];
+  char cleanResp[128];
+  
+  strncpy(cleanResp, responseText, 127);
+  cleanResp[127] = '\0';
+  size_t len = strlen(cleanResp);
+  
+  if (len > 0) {
+    if (cleanResp[len - 1] == '\n') {
+      cleanResp[len - 1] = '\0';
+    }
+  }
+
+  sprintf(crcData, "$[%s|", cleanResp);
+  uint32_t crc = calculateCRC32(crcData, strlen(crcData));
+  
+  sprintf(packet, "%s%08lX]", crcData, (unsigned long)crc);
+
+  transmitCommBusPacket(packet);
+}
+
+void transmitCommBusPacket(const char* packet) {
+  digitalWrite(kPlcDirPin, kBusTransmit);
+  Serial1.write(packet, strlen(packet));
+  Serial1.flush();
+  digitalWrite(kPlcDirPin, kBusReceive);
+}
+
+// Only commands that are safe to run on every pump at once, and that need no reply.
+bool isBroadcastCommand(const char* cmd) {
+  static const char* kAllowed[] = { "stop", "ledcolor", "ledmode", "ledfade", "ledchase", "ledtime" };
+  size_t len = strcspn(cmd, " ");
+  for (size_t i = 0; i < sizeof(kAllowed) / sizeof(kAllowed[0]); i++) {
+    if (strlen(kAllowed[i]) == len && strncmp(kAllowed[i], cmd, len) == 0) {
+      return true;
+    }
+  }
+  return false;
+}
+
+void parseCommBusPacket(char* packet) {
+  if (packet[0] == '$') {
+    if (packet[1] == '[') {
+      if (pendingBridgeResponse) {
+#if defined(DEBUG_RP2040_PORT)
+        Log.verboseln("BRIDGE - Received: %s", packet);
+#endif
+        Serial.write(packet, strlen(packet));
+        Serial.write('\n');
+        // Keep forwarding until the slave's terminal R,<result> packet arrives
+        if (strncmp(packet + 2, "R,", 2) == 0) {
+          pendingBridgeResponse = false;
+        }
+      }
+      return;
+    }
+  }
+
+  if (packet[0] != '*') {
+    return;
+  }
+  if (packet[1] != '[') {
+    return;
+  }
+  
+  char* firstPipe = strchr(packet, '|');
+  if (firstPipe == NULL) {
+    return;
+  }
+  
+  char* secondPipe = strchr(firstPipe + 1, '|');
+  if (secondPipe == NULL) {
+    return;
+  }
+  
+  size_t hashLen = (secondPipe - packet) + 1;
+  uint32_t calculatedCrc = calculateCRC32(packet, hashLen);
+  
+  char* crcEnd = strchr(secondPipe + 1, ']');
+  if (crcEnd == NULL) {
+    return;
+  }
+  
+  char crcStr[9];
+  size_t crcLen = crcEnd - (secondPipe + 1);
+  if (crcLen > 8) {
+    return; 
+  }
+  
+  strncpy(crcStr, secondPipe + 1, crcLen);
+  crcStr[crcLen] = '\0';
+  uint32_t receivedCrc = strtoul(crcStr, NULL, 16);
+  
+  if (calculatedCrc != receivedCrc) {
+    Log.warningln("COMM - CRC mismatch");
+    return;
+  }
+  
+  char addrStr[16];
+  size_t addrLen = firstPipe - (packet + 2);
+  if (addrLen > 15) {
+    addrLen = 15;
+  }
+  strncpy(addrStr, packet + 2, addrLen);
+  addrStr[addrLen] = '\0';
+  int targetAddr = atoi(addrStr);
+  bool isBroadcast = (targetAddr == kBroadcastAddress);
+
+  if (!isBroadcast && targetAddr != config.id) {
+    return;
+  }
+
+  char cmdStr[kInputBufferSize];
+  size_t cmdLen = secondPipe - (firstPipe + 1);
+  if (cmdLen > (kInputBufferSize - 1)) {
+    cmdLen = kInputBufferSize - 1;
+  }
+  strncpy(cmdStr, firstPipe + 1, cmdLen);
+  cmdStr[cmdLen] = '\0';
+
+  if (isBroadcast) {
+    if (!isBroadcastCommand(cmdStr)) {
+      Log.warningln("COMM - Ignoring non-broadcast command sent to broadcast address");
+      return;
+    }
+    currentCommandSource = SRC_BROADCAST;
+  } else {
+    currentCommandSource = SRC_COMMBUS;
+  }
+  processCommand(cmdStr);
+  currentCommandSource = SRC_UART;
+}
+
+// --- General Hardware Logic ---
+
+void initLeds() {
+  strip.begin();
+  strip.show();
+  Log.noticeln("LED - Initialized %d NeoPixels", kNumLeds);
+
+  ledR = 255;
+  ledG = 0;
+  ledB = 0;
+  ledMode = 2;
+  ledMaxBrightness = 255;
+  
+  ledFadeInMs = 300;
+  ledOnHoldMs = 200;
+  ledFadeOutMs = 300;
+  ledOffHoldMs = 200;
+  
+  fadeState = 0;
+  fadeStateStartTime = millis();
+
+  ledTimerActive = true;
+  ledTimerEndTime = millis() + kLedBootAnimationTimeMs;
+  ledStopPending = false;
+}
+
+void ledTask() {
+  uint32_t currentMillis = millis();
+  
+  if (ledTimerActive) {
+    if (currentMillis >= ledTimerEndTime) {
+      ledTimerActive = false;
+      ledStopPending = true;
+    }
+  }
+
+  switch(ledMode) {
+    case 1: 
+    {
+      if (ledStopPending) {
+        ledStopPending = false;
+        ledMaxBrightness = 0;
+      }
+      
+      strip.setBrightness(ledMaxBrightness);
+      for(int i = 0; i < kNumLeds; i++) {
+        strip.setPixelColor(i, strip.Color(ledR, ledG, ledB));
+      }
+      strip.show();
+      break;
+    }
+
+    case 2: 
+    {
+      uint32_t elapsed = currentMillis - fadeStateStartTime;
+      float progress = 0.0;
+      uint8_t currentBrightness = 0;
+
+      if (fadeState == 0) { 
+        if (elapsed >= ledFadeInMs) { 
+          fadeState = 1; 
+          fadeStateStartTime = currentMillis; 
+          elapsed = 0; 
+        }
+        
+        if (ledFadeInMs > 0) {
+          progress = (float)elapsed / ledFadeInMs;
+        } else {
+          progress = 1.0;
+        }
+        
+        currentBrightness = progress * ledMaxBrightness;
+      } else if (fadeState == 1) { 
+        if (elapsed >= ledOnHoldMs) { 
+          fadeState = 2; 
+          fadeStateStartTime = currentMillis; 
+          elapsed = 0; 
+        }
+        currentBrightness = ledMaxBrightness;
+      } else if (fadeState == 2) { 
+        if (elapsed >= ledFadeOutMs) { 
+          fadeState = 3; 
+          fadeStateStartTime = currentMillis; 
+          elapsed = 0; 
+        }
+        
+        if (ledFadeOutMs > 0) {
+          progress = (float)elapsed / ledFadeOutMs;
+        } else {
+          progress = 1.0;
+        }
+        
+        currentBrightness = ledMaxBrightness - (progress * ledMaxBrightness);
+      } else if (fadeState == 3) { 
+        if (elapsed >= ledOffHoldMs) { 
+          if (ledStopPending) {
+            ledStopPending = false;
+            ledMode = 1;
+            ledMaxBrightness = 0;
+            return;
+          }
+          fadeState = 0; 
+          fadeStateStartTime = currentMillis; 
+          elapsed = 0; 
+        }
+        currentBrightness = 0;
+      }
+
+      strip.setBrightness(currentBrightness);
+      for(int i = 0; i < kNumLeds; i++) {
+        strip.setPixelColor(i, strip.Color(ledR, ledG, ledB));
+      }
+      strip.show();
+      break;
+    }
+
+    case 3: 
+    case 4: 
+    {
+      if (currentMillis - lastChaseStepTime >= ledChaseSpeedMs) {
+        lastChaseStepTime = currentMillis;
+        chaseLedIndex += chaseDirection;
+
+        if (ledMode == 3) {
+          if (chaseLedIndex >= kNumLeds) {
+            chaseLedIndex = 0;
+            if (ledStopPending) {
+              ledStopPending = false;
+              ledMode = 1;
+              ledMaxBrightness = 0;
+              return;
+            }
+          } else if (chaseLedIndex < 0) {
+            chaseLedIndex = kNumLeds - 1;
+            if (ledStopPending) {
+              ledStopPending = false;
+              ledMode = 1;
+              ledMaxBrightness = 0;
+              return;
+            }
+          }
+        } else {
+          if (chaseLedIndex >= kNumLeds - 1) { 
+            chaseLedIndex = kNumLeds - 1; 
+            chaseDirection = -1; 
+          } else if (chaseLedIndex <= 0) { 
+            chaseLedIndex = 0; 
+            chaseDirection = 1; 
+            if (ledStopPending) {
+              ledStopPending = false;
+              ledMode = 1;
+              ledMaxBrightness = 0;
+              return;
+            }
+          }
+        }
+      }
+
+      strip.clear();
+      strip.setBrightness(ledMaxBrightness);
+      
+      for (int offset = -ledChaseGradient; offset <= ledChaseGradient; offset++) {
+        int drawIndex = chaseLedIndex + offset;
+        
+        if (ledMode == 3) {
+          if (drawIndex < 0) {
+            drawIndex += kNumLeds;
+          }
+          if (drawIndex >= kNumLeds) {
+            drawIndex -= kNumLeds;
+          }
+        } else {
+          if (drawIndex < 0 || drawIndex >= kNumLeds) {
+            continue;
+          }
+        }
+
+        float intensity = 1.0 - ((float)abs(offset) / (ledChaseGradient + 1));
+        strip.setPixelColor(drawIndex, strip.Color(ledR * intensity, ledG * intensity, ledB * intensity));
+      }
+      strip.show();
+      break;
+    }
+  }
+}
+
+void initUi() {
+  digitalWrite(kGoLedPin, HIGH);
+  pinMode(kGoLedPin, OUTPUT);
+}
+
+void initCommBus() {
+  digitalWrite(kPlcDirPin, kBusReceive);
+
+  pinMode(kMcuUart0TxPin, OUTPUT);
+  pinMode(kMcuUart0RxPin, INPUT);
+  pinMode(kPlcDirPin, OUTPUT);
+
+  Serial1.begin(kCommBusBaudRate);
+}
+
+void initPump() {
+  digitalWrite(kPumpIn1Pin, kPumpDisabled);
+  digitalWrite(kPumpIn2Pin, kPumpDisabled);
+  pinMode(kPumpIn1Pin, OUTPUT);
+  pinMode(kPumpIn2Pin, OUTPUT);
+}
+
+bool startPump(uint8_t direction, uint32_t durationMs) {
+  if (pumpActive) {
+    Log.warningln("PUMP - Busy, rejecting new motion command");
+    return false;
+  }
+  if (durationMs == 0 || durationMs > kMaxMotionMs) {
+    Log.warningln("PUMP - Invalid motion duration: %l ms", durationMs);
+    return false;
+  }
+
+  pumpDirection = direction;
+  if (direction == kPumpForward) {
+    digitalWrite(kPumpIn1Pin, kPumpDisabled);
+    digitalWrite(kPumpIn2Pin, kPumpEnabled);
+  } else {
+    digitalWrite(kPumpIn1Pin, kPumpEnabled);
+    digitalWrite(kPumpIn2Pin, kPumpDisabled);
+  }
+  pumpStartTime = millis();
+  pumpDurationMs = durationMs;
+  pumpActive = true;
+  return true;
+}
+
+void stopPump() {
+  pumpActive = false;
+  digitalWrite(kPumpIn1Pin, kPumpDisabled);
+  digitalWrite(kPumpIn2Pin, kPumpDisabled);
+}
+
+uint32_t pumpRemainingMs() {
+  if (!pumpActive) {
+    return 0;
+  }
+  uint32_t elapsed = millis() - pumpStartTime;
+  if (elapsed >= pumpDurationMs) {
+    return 0;
+  }
+  return pumpDurationMs - elapsed;
+}
+
+void pumpTask() {
+  if (pumpActive) {
+    // Subtraction keeps this correct across millis() rollover
+    if ((millis() - pumpStartTime) >= pumpDurationMs) {
+      stopPump();
+    }
+  }
+}
+
+void initScale() {
+  Log.noticeln("SCALE - Intializing scale...");
+
+  digitalWrite(kScaleClockPin, 0);
+  digitalWrite(kScaleDataPin, 0);
+  digitalWrite(kScaleRatePin, 0);
+
+  pinMode(kScaleClockPin, OUTPUT);
+  pinMode(kScaleDataPin, INPUT);
+  pinMode(kScaleRatePin, OUTPUT);
+
+  scale.begin(kScaleDataPin, kScaleClockPin, true, true);
+  scale.set_offset(config.scaleOffset);
+  scale.set_scale(config.scaleFactor);
+
+  Log.verboseln("SCALE - Using scale offset: %d", config.scaleOffset);
+  Log.verboseln("SCALE - Using scale factor: %F", config.scaleFactor);
+
+  if (scale.wait_ready_timeout(kScaleActionWaitTimeMs, kScaleWaitDelayMs)) {
+    Log.verboseln("SCALE - scale is ready to use");
+  } else {
+    Log.errorln("SCALE - scale is not ready to use");
+  }
+}
+
+bool tareScale() {
+  if (!scale.wait_ready_timeout(kScaleActionWaitTimeMs, kScaleWaitDelayMs)) {
+    Log.errorln("SCALE - scale not ready");
+    return false;
+  }
+  scale.tare(kScaleCalibrationReadings);
+  config.scaleOffset = scale.get_offset();
+  saveConfig();
+
+  Log.verboseln("SCALE - Measured tare offset: %d", config.scaleOffset);
+  return true;
+}
+
+bool calibrateScale(float weight) {
+  if (!scale.wait_ready_timeout(kScaleActionWaitTimeMs, kScaleWaitDelayMs)) {
+    Log.errorln("SCALE - scale not ready");
+    return false;
+  }
+  scale.calibrate_scale(weight, kScaleCalibrationReadings);
+  config.scaleFactor = scale.get_scale();
+  saveConfig();
+
+  Log.verboseln("SCALE - Calibrated with weight: %F", weight);
+  Log.verboseln("SCALE - Measured scale factor: %F", config.scaleFactor);
+
+  return true;
+}
+
+void saveConfig() {
+  EEPROM.put(kConfigEepromAddress, config);
+  EEPROM.commit();
+  Log.verboseln("EEPROM - Device config saved.");
+}
+
+void loadConfig() {
+  EEPROM.get(kConfigEepromAddress, config);
+  Log.verboseln("EEPROM - Device config loaded.");
+
+  if (config.id == 255) {
+    Log.warningln("EEPROM - Invaild config detected. Loading default config.");
+    clearConfig();
+    saveConfig();
+  }
+}
+
+void clearConfig() {
+  config.id = 0;
+  config.scaleOffset = 0.0;
+  config.scaleFactor = 1.0;
+  config.pumpMilliliterDurationMs = 5000;
+  saveConfig();
+}
+
+void scaleTask() {
+  if (scale.wait_ready_timeout(kScaleMeasurementWaitTimeMs, kScaleWaitDelayMs)) {
+    lastScaleReading = scale.get_units(kScaleReadingsPerMeasurement);
+  }
+}
+
+void uiTask() {
+  Log.verboseln("UPDATE - Weight: %F", lastScaleReading);
+  digitalWrite(kGoLedPin, !digitalRead(kGoLedPin));
+}
+
+void processUartInput() {
+  for (size_t i = 0; i < kMaxBytesPerCall; i++) {
+    if (!Serial.available()) {
+      break;
+    }
+    
+    uartInputLineBuffer[uartBufferLocation] = Serial.read();
+    uartBufferLocation++;
+    uartInputLineBuffer[uartBufferLocation] = '\0';
+    
+    if (uartBufferLocation == (kInputBufferSize - 1)) {
+      uartBufferLocation = 0;
+      uartInputLineBuffer[uartBufferLocation] = '\0';
+    } else if (uartInputLineBuffer[uartBufferLocation - 1] == '\n') {
+      uartInputLineBuffer[uartBufferLocation - 1] = '\0';
+      processCommand(uartInputLineBuffer);
+      uartBufferLocation = 0;
+      uartInputLineBuffer[uartBufferLocation] = '\0';
+    }
+  }
+}
+
+void processCommBus() {
+  for (size_t i = 0; i < kMaxBytesPerCall; i++) {
+    if (!Serial1.available()) {
+      break;
+    }
+    
+    char c = Serial1.read();
+    
+    if (commBusBufferLocation < (kInputBufferSize - 1)) {
+      commBusInputLineBuffer[commBusBufferLocation] = c;
+      commBusBufferLocation++;
+      commBusInputLineBuffer[commBusBufferLocation] = '\0';
+    } else {
+      commBusBufferLocation = 0;
+      commBusInputLineBuffer[commBusBufferLocation] = '\0';
+    }
+    
+    if (c == ']') {
+      parseCommBusPacket(commBusInputLineBuffer);
+      commBusBufferLocation = 0;
+      commBusInputLineBuffer[commBusBufferLocation] = '\0';
+    }
+  }
+}
+
+void writeOutput(char* buf, uint16_t count) {
+  if (currentCommandSource == SRC_BROADCAST) {
+    return;
+  } else if (currentCommandSource == SRC_UART) {
+    Serial.write(buf, count);
+  } else {
+    char temp[kOutputBufferSize];
+    strncpy(temp, buf, count);
+    temp[count] = '\0';
+    sendCommBusResponse(temp);
+  }
+}
+
+void writeOutput(const char* buf) {
+  if (currentCommandSource == SRC_BROADCAST) {
+    return;
+  } else if (currentCommandSource == SRC_UART) {
+    Serial.write(buf, strlen(buf));
+  } else {
+    sendCommBusResponse(buf);
+  }
+}
+
+void processCommand(char* buf) {
+  Log.verboseln("CMD - Got command message: %s", buf);
+
+  char* token[kMaxTokens];
+  uint8_t count = 0;
+
+  token[0] = strtok(buf, " \r");
+  if (!token[0]) {
+    // Blank line: nothing to do, and strncmp on NULL would crash
+    return;
+  }
+  for (count = 1; count < kMaxTokens; count++) {
+    token[count] = strtok(NULL, " \r");
+    if (!token[count]) {
+      break;
+    }
+  }
+
+  char* command = token[0];
+  uint8_t argCount = count - 1;
+  bool result = true;
+
+  if (strncmp("sid", command, kMaxCommandLength) == 0 && argCount > 0) {
+    int newId = atoi(token[1]);
+    // 0 is the factory default and 255 is the broadcast address
+    if (newId >= 1 && newId <= 254) {
+      config.id = newId;
+    } else {
+      result = false;
+    }
+  } else if (strncmp("gid", command, kMaxCommandLength) == 0) {
+    char outBuf[32];
+    sprintf(outBuf, "P,ID,%d\n", config.id);
+    writeOutput(outBuf);
+  } else if (strncmp("smilli", command, kMaxCommandLength) == 0 && argCount > 0) {
+    config.pumpMilliliterDurationMs = atoi(token[1]);
+  } else if (strncmp("gmilli", command, kMaxCommandLength) == 0) {
+    char outBuf[32];
+    sprintf(outBuf, "P,MILLI,%d\n", config.pumpMilliliterDurationMs);
+    writeOutput(outBuf);
+  } else if (strncmp("ledcolor", command, kMaxCommandLength) == 0 && argCount > 2) {
+    ledR = atoi(token[1]);
+    ledG = atoi(token[2]);
+    ledB = atoi(token[3]);
+  } else if (strncmp("ledmode", command, kMaxCommandLength) == 0 && argCount > 1) {
+    ledMode = atoi(token[1]);
+    ledMaxBrightness = atoi(token[2]);
+    fadeState = 0; 
+    fadeStateStartTime = millis(); 
+  } else if (strncmp("ledfade", command, kMaxCommandLength) == 0 && argCount > 3) {
+    ledFadeInMs = atoi(token[1]);
+    ledOnHoldMs = atoi(token[2]);
+    ledFadeOutMs = atoi(token[3]);
+    ledOffHoldMs = atoi(token[4]);
+  } else if (strncmp("ledchase", command, kMaxCommandLength) == 0 && argCount > 1) {
+    ledChaseSpeedMs = atoi(token[1]);
+    ledChaseGradient = atoi(token[2]);
+  } else if (strncmp("ledtime", command, kMaxCommandLength) == 0 && argCount > 0) {
+    uint32_t duration = strtoul(token[1], NULL, 10);
+    if (duration > 0) {
+      ledTimerActive = true;
+      ledTimerEndTime = millis() + duration;
+      ledStopPending = false;
+    } else {
+      ledTimerActive = false;
+      ledStopPending = false;
+    }
+  } else if (strncmp("dispense", command, kMaxCommandLength) == 0 && argCount > 0) {
+    float ml = atof(token[1]);
+    uint8_t dispLedMode = 0;
+    if (argCount > 1) {
+      dispLedMode = atoi(token[2]);
+    }
+
+    if (ml <= 0.0 || ml > kMaxDispenseMl) {
+      Log.warningln("PUMP - Dispense volume out of range");
+      result = false;
+    } else {
+      uint32_t duration = (uint32_t)(ml * config.pumpMilliliterDurationMs + 0.5);
+      result = startPump(kPumpForward, duration);
+
+      if (result && dispLedMode > 0) {
+        ledMode = dispLedMode;
+        ledTimerActive = true;
+        ledTimerEndTime = millis() + duration;
+        ledStopPending = false;
+        if (ledMaxBrightness == 0) {
+           ledMaxBrightness = 255;
+        }
+      }
+    }
+  } else if (strncmp("prime", command, kMaxCommandLength) == 0 && argCount > 0) {
+    result = startPump(kPumpForward, strtoul(token[1], NULL, 10));
+  } else if (strncmp("purge", command, kMaxCommandLength) == 0 && argCount > 0) {
+    result = startPump(kPumpReverse, strtoul(token[1], NULL, 10));
+  } else if (strncmp("stop", command, kMaxCommandLength) == 0) {
+    stopPump();
+    ledTimerActive = false;
+    ledStopPending = false;
+    Log.noticeln("PUMP - Stopped by command");
+  } else if (strncmp("status", command, kMaxCommandLength) == 0) {
+    const char* state = "IDLE";
+    if (pumpActive) {
+      state = (pumpDirection == kPumpForward) ? "FWD" : "REV";
+    }
+    char outBuf[48];
+    sprintf(outBuf, "P,STATUS,%s,%lu\n", state, (unsigned long)pumpRemainingMs());
+    writeOutput(outBuf);
+  } else if (strncmp("tare", command, kMaxCommandLength) == 0) {
+    result = tareScale();
+  } else if (strncmp("cal", command, kMaxCommandLength) == 0 && argCount > 0) {
+    result = calibrateScale(atof(token[1]));
+  } else if (strncmp("weight", command, kMaxCommandLength) == 0) {
+    char outBuf[32];
+    sprintf(outBuf, "P,WEIGHT,%f\n", lastScaleReading);
+    writeOutput(outBuf);
+  } else if (strncmp("scfg", command, kMaxCommandLength) == 0) {
+    saveConfig();
+  } else if (strncmp("version", command, kMaxCommandLength) == 0) {
+    char version[16];
+    sprintf(version, "P,VER,%s\n", kFirmwareVersion);
+    writeOutput(version);
+  } else if (strncmp("bridge", command, kMaxCommandLength) == 0 && argCount > 1 && currentCommandSource == SRC_UART) {
+    int targetAddr = atoi(token[1]);
+    bool isBroadcast = (targetAddr == kBroadcastAddress);
+
+    char bridgeCmd[64];
+    bridgeCmd[0] = '\0';
+
+    for (int i = 2; i < count; i++) {
+      if (strlen(bridgeCmd) + strlen(token[i]) + 2 > sizeof(bridgeCmd)) {
+        Log.warningln("BRIDGE - Command too long");
+        writeOutput("R,ERR\n");
+        return;
+      }
+      strcat(bridgeCmd, token[i]);
+      if (i < count - 1) {
+        strcat(bridgeCmd, " ");
+      }
+    }
+
+    if (targetAddr < 1 || targetAddr > kBroadcastAddress || targetAddr == config.id) {
+      // Out of range, or our own address (nobody on the bus would answer)
+      writeOutput("R,ERR\n");
+      return;
+    }
+    if (pendingBridgeResponse) {
+      Log.warningln("BRIDGE - Busy, previous request still pending");
+      writeOutput("R,ERR\n");
+      return;
+    }
+    if (isBroadcast && !isBroadcastCommand(bridgeCmd)) {
+      writeOutput("R,ERR\n");
+      return;
+    }
+
+    char crcData[128];
+    sprintf(crcData, "*[%d|%s|", targetAddr, bridgeCmd);
+    uint32_t crc = calculateCRC32(crcData, strlen(crcData));
+
+    char packet[128];
+    sprintf(packet, "%s%08lX]", crcData, (unsigned long)crc);
+
+#if defined(DEBUG_RP2040_PORT)
+    Log.verboseln("BRIDGE - Sent: %s", packet);
+#endif
+
+    transmitCommBusPacket(packet);
+
+    if (isBroadcast) {
+      // Slaves don't reply to broadcasts. Run it here too; its local
+      // R,<result> is the response the host sees.
+      processCommand(bridgeCmd);
+    } else {
+      // No local ack: the forwarded $[...] packets (or R,TIMEOUT) are the response
+      pendingBridgeResponse = true;
+      bridgeTimeoutMs = millis() + kBridgeTimeoutMs;
+    }
+    return;
+  } else {
+    Log.warning("CMD - Invalid Command");
+    writeOutput("R,INVLD\n");
+    return;
+  }
+
+  if (result) {
+    writeOutput("R,OK\n");
+  } else {
+    writeOutput("R,ERR\n");
+  }
+}
