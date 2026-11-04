@@ -1,0 +1,290 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark light">
+<title>DrinkBot</title>
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header id="hdr">
+  <div class="hdr-left">
+    <span class="brand">DrinkBot</span>
+    <span id="simBanner" class="sim" hidden>SIMULATOR</span>
+    <span id="conn" class="conn off" title="WebSocket connection">Reconnecting</span>
+    <span id="wifi" class="muted">Wi-Fi: —</span>
+    <span id="sysState" class="pill">—</span>
+  </div>
+  <div class="hdr-right">
+    <button id="btnReboot" class="btn" data-needs-conn>Reboot</button>
+    <button id="btnEstop" class="estop" data-needs-conn title="Stop all pumps now">E-STOP</button>
+  </div>
+</header>
+<div id="errBar" class="errbar" hidden></div>
+
+<nav id="tabs">
+  <div class="tabbar" role="tablist">
+    <button data-tab="dash" class="active">Dashboard</button>
+    <button data-tab="recipes">Recipes</button>
+    <button data-tab="pumps">Pumps</button>
+    <button data-tab="buttons">Buttons</button>
+    <button data-tab="wifi">Wi-Fi</button>
+    <button data-tab="settings">Settings</button>
+    <button data-tab="maint">Maintenance</button>
+  </div>
+  <select id="tabSelect" aria-label="Tab">
+    <option value="dash">Dashboard</option>
+    <option value="recipes">Recipes</option>
+    <option value="pumps">Pumps</option>
+    <option value="buttons">Buttons</option>
+    <option value="wifi">Wi-Fi</option>
+    <option value="settings">Settings</option>
+    <option value="maint">Maintenance</option>
+  </select>
+</nav>
+
+<main id="main">
+  <!-- Dashboard -->
+  <section id="tab-dash" class="tab active">
+    <div class="grid2">
+      <div class="card">
+        <h2>Dispense</h2>
+        <div class="row wrap">
+          <label class="fld grow">Recipe
+            <select id="dRecipe" data-needs-conn></select>
+          </label>
+          <label class="fld">Volume (ml)
+            <input id="dVolume" type="number" step="1" data-needs-conn>
+          </label>
+          <button id="dGo" class="btn primary big" data-needs-conn>Dispense</button>
+        </div>
+        <div id="dRecipeInfo" class="muted small"></div>
+        <div id="dProgress" class="progress-box" hidden>
+          <div class="row"><strong id="dProgTitle"></strong><span id="dProgStatus" class="muted"></span></div>
+          <div class="bar"><div id="dProgBar"></div></div>
+          <table class="tbl compact"><thead><tr><th>#</th><th>Liquid</th><th>Target</th><th>Actual</th><th></th></tr></thead>
+          <tbody id="dProgRows"></tbody></table>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Controller</h2>
+        <div id="ledMirror" class="leds"></div>
+      </div>
+    </div>
+
+    <div class="card bulkbar">
+      <div class="row wrap">
+        <button id="bPrimeAll" class="btn" data-needs-conn>Prime All</button>
+        <button id="bPurgeAll" class="btn warn" data-needs-conn>Purge All</button>
+        <span id="bulkHint" class="muted small"></span>
+      </div>
+      <div id="bulkProgress" class="progress-box" hidden>
+        <div class="row"><strong id="bulkTitle"></strong><span id="bulkStatus" class="muted"></span></div>
+        <div class="bar"><div id="bulkBar"></div></div>
+        <table class="tbl compact"><thead><tr><th>Pump</th><th>Liquid</th><th>Seconds</th><th></th></tr></thead>
+        <tbody id="bulkRows"></tbody></table>
+      </div>
+    </div>
+
+    <div id="pumpCards" class="cards"></div>
+  </section>
+
+  <!-- Recipes -->
+  <section id="tab-recipes" class="tab">
+    <div class="toolbar">
+      <h2>Recipes <span class="dirty" hidden>● unsaved</span></h2>
+      <div class="row">
+        <button class="btn" id="rAdd" data-needs-conn>Add</button>
+        <button class="btn" id="rDup" data-needs-conn>Duplicate</button>
+        <button class="btn danger" id="rDel" data-needs-conn>Delete</button>
+        <button class="btn" data-revert>Revert</button>
+        <button class="btn primary" data-save data-needs-conn>Save</button>
+      </div>
+    </div>
+    <div class="errsum" hidden></div>
+    <div class="split">
+      <ul id="rList" class="list"></ul>
+      <div id="rEditor" class="card"></div>
+    </div>
+  </section>
+
+  <!-- Pumps -->
+  <section id="tab-pumps" class="tab">
+    <div class="toolbar">
+      <h2>Pumps <span class="dirty" hidden>● unsaved</span></h2>
+      <div class="row">
+        <button class="btn" id="pAdd" data-needs-conn>Add pump</button>
+        <button class="btn" data-revert>Revert</button>
+        <button class="btn primary" data-save data-needs-conn>Save</button>
+      </div>
+    </div>
+    <p class="muted small">Saving the pump list triggers a rescan. Ingredients match pump liquids by name (case-insensitive).</p>
+    <div class="errsum" hidden></div>
+    <div class="tblwrap">
+      <table class="tbl" id="pTable">
+        <thead><tr><th>Pump ID</th><th>Liquid</th><th>ms/ml</th><th>Density g/ml</th><th>Color</th><th>Auto prime (s)</th><th>Status / level</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Buttons -->
+  <section id="tab-buttons" class="tab">
+    <div class="toolbar">
+      <h2>Buttons <span class="dirty" hidden>● unsaved</span></h2>
+      <div class="row">
+        <button class="btn" data-revert>Revert</button>
+        <button class="btn primary" data-save data-needs-conn>Save</button>
+      </div>
+    </div>
+    <div class="errsum" hidden></div>
+    <div class="tblwrap">
+      <table class="tbl" id="bTable">
+        <thead><tr><th>Button</th><th>Action</th><th>Parameter</th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Wi-Fi -->
+  <section id="tab-wifi" class="tab">
+    <div class="toolbar">
+      <h2>Wi-Fi networks <span class="dirty" hidden>● unsaved</span></h2>
+      <div class="row">
+        <button class="btn" id="wAdd" data-needs-conn>Add network</button>
+        <button class="btn" data-revert>Revert</button>
+        <button class="btn primary" data-save data-needs-conn>Save</button>
+      </div>
+    </div>
+    <p class="note">Networks are tried in the listed order. Changes apply after a reboot. With no reachable network the controller starts an open access point.</p>
+    <div class="errsum" hidden></div>
+    <div class="tblwrap">
+      <table class="tbl" id="wTable">
+        <thead><tr><th>#</th><th>SSID</th><th>Password</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+  </section>
+
+  <!-- Settings -->
+  <section id="tab-settings" class="tab">
+    <div class="toolbar">
+      <h2>Settings <span class="dirty" hidden>● unsaved</span></h2>
+      <div class="row">
+        <button class="btn" data-revert>Revert</button>
+        <button class="btn primary" data-save data-needs-conn>Save</button>
+      </div>
+    </div>
+    <div class="errsum" hidden></div>
+    <div id="sForm" class="grid3"></div>
+    <div class="grid3">
+      <div class="card">
+        <h3>Configuration file</h3>
+        <p class="muted small">Export downloads the saved config. Import validates a file, then replaces the whole config.</p>
+        <div class="row wrap">
+          <a class="btn" id="sExport" href="/api/config" download="drinkbot-config.json">Export config</a>
+          <label class="btn" data-needs-conn>Import config…<input type="file" id="sImport" accept=".json,application/json" hidden></label>
+        </div>
+        <div id="sImportMsg" class="small"></div>
+      </div>
+      <div class="card">
+        <h3>Firmware update</h3>
+        <div class="row wrap">
+          <input type="file" id="otaFile" accept=".bin" data-needs-conn>
+          <button class="btn warn" id="otaGo" data-needs-conn>Upload</button>
+        </div>
+        <div class="bar"><div id="otaBar"></div></div>
+        <div id="otaMsg" class="small muted"></div>
+      </div>
+      <div class="card">
+        <h3>Device info</h3>
+        <dl id="sInfo" class="kv"></dl>
+        <button class="btn small" id="sInfoRefresh">Refresh</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Maintenance -->
+  <section id="tab-maint" class="tab">
+    <h2>Maintenance</h2>
+    <div class="grid3">
+      <div class="card">
+        <h3>Pump</h3>
+        <label class="fld">Pump <select id="mPump" data-needs-conn></select></label>
+        <div id="mPumpInfo" class="muted small"></div>
+        <hr>
+        <p class="small">Tare: place the empty container on the scale.</p>
+        <button class="btn" id="mTare" data-needs-conn>Tare</button>
+        <hr>
+        <p class="small">Calibrate: place the known weight on the scale.</p>
+        <div class="row"><label class="fld">Known weight (g)<input type="number" id="mGrams" min="0.1" step="0.1" value="500" data-needs-conn></label>
+        <button class="btn" id="mCal" data-needs-conn>Calibrate</button></div>
+        <hr>
+        <div class="row"><label class="fld">New ID (1–254)<input type="number" id="mNewId" min="1" max="254" step="1" data-needs-conn></label>
+        <button class="btn warn" id="mSetId" data-needs-conn>Set ID</button></div>
+        <hr>
+        <button class="btn" id="mLed" data-needs-conn>LED test</button>
+      </div>
+      <div class="card">
+        <h3>Raw command console</h3>
+        <form id="mRawForm" class="row">
+          <input id="mRaw" class="grow" maxlength="63" placeholder="e.g. version, weight, status" autocomplete="off" data-needs-conn>
+          <button class="btn" data-needs-conn>Send</button>
+        </form>
+        <pre id="mRawOut" class="console"></pre>
+      </div>
+      <div class="card">
+        <h3>System</h3>
+        <div class="row wrap">
+          <button class="btn" id="mRescan" data-needs-conn>Rescan pumps</button>
+          <button class="btn" id="mClear" data-needs-conn>Clear errors</button>
+        </div>
+        <div id="mErrors" class="small"></div>
+        <div id="simPanel" hidden>
+          <hr>
+          <h3>Simulator fault injection</h3>
+          <p class="muted small">Applies to the pump selected on the left.</p>
+          <div class="row wrap">
+            <button class="btn" id="fMissing" data-needs-conn>Mark missing</button>
+            <button class="btn" id="fPresent" data-needs-conn>Mark present</button>
+            <button class="btn" id="fTimeout" data-needs-conn>Timeout next command</button>
+            <button class="btn" id="fOverrun" data-needs-conn>Overrun next motion</button>
+          </div>
+          <div class="row"><label class="fld">Weight (g)<input type="number" id="fWeight" min="0" step="1" value="100" data-needs-conn></label>
+          <button class="btn" id="fSetWeight" data-needs-conn>Set weight</button></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<div id="logResize" class="resizer" title="Drag to resize" role="separator" aria-orientation="horizontal"></div>
+<section id="log">
+  <div class="logbar">
+    <strong>Log</strong>
+    <select id="logLevel" title="Web log level" data-needs-conn>
+      <option>ERROR</option><option>WARN</option><option selected>INFO</option><option>DEBUG</option><option>VERBOSE</option>
+    </select>
+    <label class="chk"><input type="checkbox" id="logAuto" checked> Auto-scroll</label>
+    <button class="btn small" id="logClear">Clear</button>
+    <span id="logCount" class="muted small"></span>
+  </div>
+  <div id="logView" class="logview"></div>
+</section>
+
+<div id="modal" class="modal" hidden>
+  <div class="dlg" role="dialog" aria-modal="true">
+    <h3 id="modalTitle"></h3>
+    <div id="modalBody"></div>
+    <div class="row end">
+      <button class="btn" id="modalCancel">Cancel</button>
+      <button class="btn primary" id="modalOk">OK</button>
+    </div>
+  </div>
+</div>
+<div id="toasts" class="toasts"></div>
+<script src="app.js"></script>
+</body>
+</html>
