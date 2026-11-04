@@ -1,143 +1,86 @@
-// M0 spike: prove the USB host CDC-ACM link to a DrinkBotPump.
-// Opens the first CDC device, asserts DTR/RTS, sends `version` and `gid`
-// and logs every reply line on UART0 (D6 = TX, 115200 8N1).
+// DrinkBotController firmware entry point (SPEC_v3).
+// M2 wiring: logging, USB-or-simulator pump link, discovery and polling.
+// The App task, UI, network and web server are added in later milestones.
 
 #include <Arduino.h>
 
-#include "usb/usb_host.h"
-#include "usb/cdc_acm_host.h"
+#include <memory>
+
+#include "core/Config.h"
+#include "core/Log.h"
+#include "core/PumpManager.h"
+#include "core/TransactionEngine.h"
+#include "hal/UsbPumpLink.h"
+#include "sim/SimPumpLink.h"
+
+using namespace drinkbot;
 
 namespace {
 
 constexpr uint32_t kUsbDetectTimeoutMs = 3000;
-constexpr uint32_t kTxTimeoutMs = 500;
 
-cdc_acm_dev_hdl_t pumpDev = nullptr;
-volatile bool pumpDisconnected = false;
+class MillisClock : public IClock {
+ public:
+  uint32_t nowMs() const override { return millis(); }
+};
 
-char rxLine[257];
-size_t rxLen = 0;
+// UART0 on D6 (TX) / D7 (RX), 115200 8N1 (§3.2, §12.3)
+class UartLogSink : public ILogSink {
+ public:
+  void write(const LogEntry& entry) override { Serial.println(formatLogLine(entry).c_str()); }
+};
 
-void usbHostTask(void*) {
-  while (true) {
-    uint32_t flags = 0;
-    usb_host_lib_handle_events(portMAX_DELAY, &flags);
-    if (flags & USB_HOST_LIB_EVENT_FLAGS_NO_CLIENTS) {
-      usb_host_device_free_all();
-    }
+// Logs raised/cleared errors until SystemState takes this over in M3.
+class LoggingErrorReporter : public IErrorReporter {
+ public:
+  void raiseError(ErrorCode code, int pumpId, const std::string& message) override {
+    LOG_E("SYS", "%s(%d): %s", errorCodeName(code), pumpId, message.c_str());
   }
-}
-
-bool onRx(const uint8_t* data, size_t len, void*) {
-  for (size_t i = 0; i < len; i++) {
-    char c = static_cast<char>(data[i]);
-    if (c == '\r') {
-      continue;
-    }
-    if (c == '\n') {
-      rxLine[rxLen] = '\0';
-      Serial.printf("[%8lu] USB  < %s\n", millis(), rxLine);
-      rxLen = 0;
-    } else if (rxLen < sizeof(rxLine) - 1) {
-      rxLine[rxLen++] = c;
-    } else {
-      Serial.println("USB  - RX line too long, discarded");
-      rxLen = 0;
-    }
+  void clearError(ErrorCode code, int pumpId) override {
+    LOG_D("SYS", "%s(%d) cleared", errorCodeName(code), pumpId);
   }
-  return true;
-}
+};
 
-void onEvent(const cdc_acm_host_dev_event_data_t* event, void*) {
-  if (event->type == CDC_ACM_HOST_DEVICE_DISCONNECTED) {
-    pumpDisconnected = true;
-  } else if (event->type == CDC_ACM_HOST_ERROR) {
-    Serial.printf("USB  - CDC error %d\n", event->data.error);
-  }
-}
-
-bool openPump() {
-  cdc_acm_host_open_config_t cfg = {};
-  cfg.vid = CDC_HOST_ANY_VID;
-  cfg.pid = CDC_HOST_ANY_PID;
-  cfg.interface_idx = 0;
-  cfg.dev_addr = CDC_HOST_ANY_DEV_ADDR;
-  cfg.connection_timeout_ms = kUsbDetectTimeoutMs;
-  cfg.out_buffer_size = 128;
-  cfg.in_buffer_size = 0;
-  cfg.event_cb = onEvent;
-  cfg.data_cb = onRx;
-  cfg.user_arg = nullptr;
-
-  if (cdc_acm_host_open(&cfg, &pumpDev) != ESP_OK) {
-    pumpDev = nullptr;
-    return false;
-  }
-
-  cdc_acm_line_coding_t coding = {};
-  coding.dwDTERate = 115200;
-  coding.bCharFormat = 0;
-  coding.bParityType = 0;
-  coding.bDataBits = 8;
-  cdc_acm_host_line_coding_set(pumpDev, &coding);
-
-  // The RP2040 TinyUSB CDC stack may drop TX until DTR is asserted
-  cdc_acm_host_set_control_line_state(pumpDev, true, true);
-  return true;
-}
-
-void sendLine(const char* line) {
-  if (!pumpDev) {
-    return;
-  }
-  char buf[66];
-  int n = snprintf(buf, sizeof(buf), "%s\n", line);
-  Serial.printf("[%8lu] USB  > %s\n", millis(), line);
-  esp_err_t err = cdc_acm_host_data_tx_blocking(pumpDev, reinterpret_cast<const uint8_t*>(buf), n, kTxTimeoutMs);
-  if (err != ESP_OK) {
-    Serial.printf("USB  - TX failed: %s\n", esp_err_to_name(err));
-  }
-}
+MillisClock clock_;
+UartLogSink uartSink;
+LoggingErrorReporter errorReporter;
+UsbPumpLink usbLink;
+std::unique_ptr<SimPumpLink> simLink;
+IPumpTransport* transport = nullptr;
+std::unique_ptr<TransactionEngine> engine;
+std::unique_ptr<PumpManager> pumpManager;
 
 }  // namespace
 
 void setup() {
   Serial.begin(115200);
-  delay(200);
-  Serial.println("SYS  - DrinkBotController M0 USB spike");
+  logger().setClock(&clock_);
+  logger().addSink(&uartSink, LogLevel::Debug);
+  LOG_I("SYS", "DrinkBotController starting (build %s %s)", __DATE__, __TIME__);
 
-  usb_host_config_t hostCfg = {};
-  hostCfg.skip_phy_setup = false;
-  hostCfg.intr_flags = ESP_INTR_FLAG_LEVEL1;
-  ESP_ERROR_CHECK(usb_host_install(&hostCfg));
-  xTaskCreatePinnedToCore(usbHostTask, "usb_host", 4096, nullptr, 10, nullptr, 1);
-  ESP_ERROR_CHECK(cdc_acm_host_install(nullptr));
+  JsonDocument doc;
+  makeFactoryDefaultConfig(doc);
+  Config config;
+  parseConfig(doc.as<JsonVariantConst>(), config);
 
-  if (!openPump()) {
-    Serial.println("USB  - No CDC device within 3 s: would enter simulator mode");
-    return;
+  bool simulator = !usbLink.begin() || !usbLink.waitForDevice(kUsbDetectTimeoutMs);
+  if (simulator) {
+    LOG_W("SIM", "No pump USB device within 3 s: running in SIMULATOR mode");
+    simLink.reset(new SimPumpLink(clock_, SimPumpLink::specsFromConfig(config)));
+    transport = simLink.get();
+  } else {
+    transport = &usbLink;
   }
-  Serial.println("USB  - CDC device opened");
 
-  // Let the pump's USB CDC settle after DTR
-  delay(100);
-  sendLine("version");
-  delay(200);
-  sendLine("gid");
+  engine.reset(new TransactionEngine(*transport, clock_));
+  pumpManager.reset(new PumpManager(*engine, clock_, errorReporter));
+  pumpManager->applyConfig(config);
+  pumpManager->setPollingEnabled(true);
 }
 
 void loop() {
-  if (pumpDisconnected) {
-    pumpDisconnected = false;
-    Serial.println("USB  - Pump disconnected");
-    cdc_acm_host_close(pumpDev);
-    pumpDev = nullptr;
-  }
-
-  static uint32_t nextPoll = 0;
-  if (pumpDev && millis() >= nextPoll) {
-    nextPoll = millis() + 5000;
-    sendLine("weight");
-  }
-  delay(10);
+  transport->tick();
+  engine->tick();
+  pumpManager->tick();
+  delay(5);
 }
