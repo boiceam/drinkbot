@@ -11,3 +11,6 @@ build/
 # Editor
 .vscode/
 .idea/
+
+# PlatformIO / generated
+Software/DrinkBotController/src/generated/

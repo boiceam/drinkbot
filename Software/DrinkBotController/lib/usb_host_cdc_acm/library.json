@@ -1,0 +1,11 @@
+{
+  "name": "usb_host_cdc_acm",
+  "version": "2.4.1",
+  "description": "Espressif USB Host CDC-ACM driver, vendored from github.com/espressif/esp-usb (host/class/cdc/usb_host_cdc_acm @ 686ce96). Apache-2.0.",
+  "license": "Apache-2.0",
+  "frameworks": "arduino",
+  "platforms": "espressif32",
+  "build": {
+    "flags": ["-Isrc/esp_private", "-Isrc/private"]
+  }
+}
