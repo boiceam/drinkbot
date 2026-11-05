@@ -75,6 +75,12 @@ const SimPumpLink::Pump* SimPumpLink::find(int id) const {
   return const_cast<SimPumpLink*>(this)->find(id);
 }
 
+namespace {
+bool isScaleAction(const std::string& cmd) {
+  return cmd == "tare" || cmd == "cal";
+}
+}  // namespace
+
 void SimPumpLink::schedule(uint32_t delayMs, const std::string& line) {
   outbox_.emplace(clock_.nowMs() + delayMs, line);
 }
@@ -120,8 +126,9 @@ bool SimPumpLink::writeLine(const std::string& line) {
       bridge->dropResponses--;
       return true;
     }
+    uint32_t delay = kDirectLatencyMs + (isScaleAction(tokens[0]) ? kScaleActionMs : 0);
     for (const auto& l : reply) {
-      schedule(kDirectLatencyMs, l);
+      schedule(delay, l);
     }
     return true;
   }
@@ -176,8 +183,15 @@ bool SimPumpLink::writeLine(const std::string& line) {
     schedule(kBridgeTimeoutMs, "R,TIMEOUT");
     return true;
   }
+  std::vector<std::string> innerTokens = tokenize(inner);
+  uint32_t delay = kBridgedLatencyMs +
+                   (!innerTokens.empty() && isScaleAction(innerTokens[0]) ? kScaleActionMs : 0);
+  if (delay >= kBridgeTimeoutMs) {
+    schedule(kBridgeTimeoutMs, "R,TIMEOUT");
+    return true;
+  }
   for (const auto& l : reply) {
-    schedule(kBridgedLatencyMs, wrapBridged(l));
+    schedule(delay, wrapBridged(l));
   }
   bridgePending_ = false;
   return true;

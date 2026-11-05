@@ -7,7 +7,7 @@ The `DrinkBotPump` firmware operates a networked liquid dispensing node designed
 *   **Target Board:** Raspberry Pi Pico (RP2040)
 *   **IDE:** Arduino IDE version 2.3.10 or greater
 *   **Required Libraries:**
-    *   **HX711** by Bogdan Necula
+    *   **HX711** by Rob Tillaart (0.6.x)
     *   **Adafruit NeoPixel** by Adafruit
     *   **ArduinoLog** by Thijs Elenbaas
 
@@ -15,12 +15,16 @@ The `DrinkBotPump` firmware operates a networked liquid dispensing node designed
 
 Core behaviors are defined at the top of `DrinkBotPump.ino` using `constexpr` constants for easy modification:
 *   `kLedBootAnimationTimeMs` (Default 5000ms) - Duration of the red boot-up visual.
-*   `kCommBusBaudRate` (Default 115200) - Serial baud rate for RS485 data transmission.
-*   `kBridgeTimeoutMs` (Default 2000ms) - Time the controller will wait for a response when acting as a UART-to-RS485 bridge.
-*   `kScaleMeasurementWaitTimeMs` / `kScaleReadingsPerMeasurement` - The timeout limits and readings averaged per standard task loop pass.
+*   `kCommBusBaudRate` (Default 9600) - Serial baud rate for RS485 data transmission. Every pump on a bus must use the same rate.
+*   `kBridgeTimeoutMs` (Default 3000ms) - Time the pump waits for the final response when acting as a UART-to-RS485 bridge. It must exceed the ~1.8 s that a bridged `tare` or `cal` takes.
+*   `kScaleTaskIntervalMs` / `kScaleReadingsPerMeasurement` - Minimum interval between background weight readings, and readings averaged per pass. The loop never waits for the HX711: it reads only once a sample is ready (10 samples/s).
 *   `kScaleActionWaitTimeMs` / `kScaleCalibrationReadings` - Higher-precision read configurations used strictly when zeroing (tare) or calibrating the scale.
 *   `kMaxMotionMs` (Default 120000ms) - Safety cap on any single pump run. Any `dispense`, `prime` or `purge` that would run longer is rejected.
 *   `kBroadcastAddress` (Default 255) - RS485 address that every pump obeys without replying.
+
+## Power: One Pump at a Time
+
+The pump power supply is sized for **one running pump**. The system must never run two pumps at the same time. The firmware doesn't enforce this across the bus (a pump can't see the others' state); the controller, and any test tool, must make sure the previous pump is stopped before starting another.
 
 ## Debugging Setup
 
@@ -41,10 +45,11 @@ A traditional text-based interface used for direct computer-to-device communicat
 *   **Example Response:** `R,OK\n`
 
 **2. RS485 Shared Bus (CommBus)**
-A robust, addressed, and error-checked protocol designed for a single master to communicate with multiple slave devices over a shared serial bus operating at the defined `kCommBusBaudRate`. It wraps standard UART commands in a specialized packet structure.
+A robust, addressed, and error-checked protocol at 9600 baud designed for a single master to communicate with multiple slave devices over a shared serial bus operating at the defined `kCommBusBaudRate`. It wraps standard UART commands in a specialized packet structure.
 *   **Packet Structure:** `*[address|command|CRC32]`
 *   **Response Structure:** `$[response|CRC32]`
 *   **Behavior:** Devices only process packets matching their configured ID (address). Any CRC32 mismatch or unrecognized address is silently ignored.
+*   **Resync:** `*` and `$` only ever start a packet. On either one the receiver discards any partial bytes it was holding, so line noise can't spoil the next good packet.
 *   **Example:** `*[3|dispense 5000|D2A8F3B1]` (Command to device ID 3 to dispense for 5000 ms)
 
 **3. UART-to-RS485 Bridging**
@@ -55,7 +60,7 @@ Any device connected directly to a computer (or a DrinkBotController) via USB ca
     $[P,WEIGHT,123.456000|<CRC32>]
     $[R,OK|<CRC32>]
     ```
-*   **Timeout:** if the final packet does not arrive within `kBridgeTimeoutMs`, the bridge writes `R,TIMEOUT`.
+*   **Timeout:** if the final packet does not arrive within `kBridgeTimeoutMs` (3 s), the bridge writes `R,TIMEOUT`.
 *   **Rejected with `R,ERR`:**
     *   a target outside 1-255, or the bridge's own ID (address the bridge directly instead);
     *   a request while another bridged request is still pending;
@@ -94,9 +99,15 @@ Every motion command is rejected with `R,ERR` if the pump is already running, or
 
 **System**
 *   `bridge <id> <command>`: Bridge a standard command to a specific device (or `255` for broadcast) over RS485. See Communication Protocols above.
-*   `version`: Returns firmware version (Returns: `P,VER,0.4.0`).
+*   `version`: Returns firmware version (Returns: `P,VER,0.5.0`).
 
 ## Changelog
+
+**0.5.0**
+*   RS485 bus runs at **9600 baud** (was 115200) for better noise immunity. All pumps on a bus must run 0.5.0.
+*   Bridge timeout raised from 2 s to 3 s, so a bridged `tare` / `cal` (~1.8 s) reliably completes.
+*   The bus receiver resyncs on `*` / `$`, so a packet after line noise (or a pump powering up) isn't lost.
+*   Smoother fade (LED mode 2): no more one-frame black flash at the peak or bright flash at the end of fade-out, gamma-corrected brightness, and the loop no longer stalls up to 100 ms waiting for the scale, which caused skipped LED frames.
 
 **0.4.0**
 *   `dispense` takes a run time in milliseconds instead of a volume. The controller does the volume-to-time conversion.

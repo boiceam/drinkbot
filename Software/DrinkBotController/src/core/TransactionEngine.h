@@ -22,7 +22,11 @@ class TransactionEngine {
   static constexpr int kDirect = 0;
 
   static constexpr uint32_t kDirectTimeoutMs = 500;
-  static constexpr uint32_t kBridgeTimeoutMs = 2500;
+  // `tare` / `cal` block the pump for ~1.8 s (20 HX711 samples at 10/s)
+  static constexpr uint32_t kSlowDirectTimeoutMs = 3000;
+  // Longer than the pump's own 3 s bridge timeout (firmware 0.5.0), so the
+  // bridge's R,TIMEOUT arrives before ours fires
+  static constexpr uint32_t kBridgeTimeoutMs = 3500;
   // After a timeout or bad CRC, late lines of that exchange are discarded.
   static constexpr uint32_t kQuietAfterFailureMs = 100;
 

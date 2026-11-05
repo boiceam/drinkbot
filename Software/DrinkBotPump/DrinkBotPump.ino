@@ -22,12 +22,12 @@
 #include <EEPROM.h>
 #include <ArduinoLog.h>
 #include <Adafruit_NeoPixel.h>
+#include <math.h>
 
 // --- Global Constants ---
 constexpr uint32_t kLedBootAnimationTimeMs = 5000;
-constexpr uint32_t kCommBusBaudRate = 115200;
-constexpr uint32_t kBridgeTimeoutMs = 2000;
-constexpr uint32_t kScaleMeasurementWaitTimeMs = 200;
+constexpr uint32_t kCommBusBaudRate = 9600;
+constexpr uint32_t kBridgeTimeoutMs = 3000;  // > the ~1.8 s blocking tare/cal at 10 samples/s
 constexpr uint8_t  kScaleReadingsPerMeasurement = 1;
 constexpr uint32_t kScaleActionWaitTimeMs = 2000;
 constexpr uint8_t  kScaleCalibrationReadings = 20;
@@ -73,7 +73,7 @@ constexpr uint8_t kMaxTokens = 8;
 constexpr uint8_t kMaxCommandLength = 15;
 
 constexpr uint16_t kConfigEepromAddress = 0;
-const char* kFirmwareVersion = "0.4.0";
+const char* kFirmwareVersion = "0.5.0";
 
 constexpr uint8_t kPumpEnabled = 1;
 constexpr uint8_t kPumpDisabled = 0;
@@ -172,9 +172,10 @@ void setup() {
 void loop() {
   auto currentMillis = millis();
   
-  if (currentMillis >= nextScaleTaskTime) {
+  // Read the scale once a reading is due AND the HX711 has one ready, so the
+  // loop never waits on it (waiting stalled the 20 ms LED frames).
+  if (currentMillis >= nextScaleTaskTime && scaleTask()) {
     nextScaleTaskTime = currentMillis + kScaleTaskIntervalMs;
-    scaleTask();
   }
 
   if (currentMillis >= nextUiTaskTime) {
@@ -380,6 +381,15 @@ void initLeds() {
   ledStopPending = false;
 }
 
+uint16_t fadePhaseMs(uint8_t state) {
+  switch (state) {
+    case 0: return ledFadeInMs;
+    case 1: return ledOnHoldMs;
+    case 2: return ledFadeOutMs;
+    default: return ledOffHoldMs;
+  }
+}
+
 void ledTask() {
   uint32_t currentMillis = millis();
   
@@ -408,59 +418,41 @@ void ledTask() {
 
     case 2: 
     {
+      // Step past every phase whose time is used up, carrying the overshoot
+      // into the next phase, so a boundary frame is always drawn with the new
+      // phase's level (no black frame at the peak or bright frame at the end).
       uint32_t elapsed = currentMillis - fadeStateStartTime;
-      float progress = 0.0;
-      uint8_t currentBrightness = 0;
-
-      if (fadeState == 0) { 
-        if (elapsed >= ledFadeInMs) { 
-          fadeState = 1; 
-          fadeStateStartTime = currentMillis; 
-          elapsed = 0; 
+      for (uint8_t guard = 0; guard < 4; guard++) {
+        uint16_t phaseMs = fadePhaseMs(fadeState);
+        if (elapsed < phaseMs) {
+          break;
         }
-        
-        if (ledFadeInMs > 0) {
-          progress = (float)elapsed / ledFadeInMs;
-        } else {
-          progress = 1.0;
+        if (fadeState == 3 && ledStopPending) {
+          ledStopPending = false;
+          ledMode = 1;
+          ledMaxBrightness = 0;
+          return;
         }
-        
-        currentBrightness = progress * ledMaxBrightness;
-      } else if (fadeState == 1) { 
-        if (elapsed >= ledOnHoldMs) { 
-          fadeState = 2; 
-          fadeStateStartTime = currentMillis; 
-          elapsed = 0; 
-        }
-        currentBrightness = ledMaxBrightness;
-      } else if (fadeState == 2) { 
-        if (elapsed >= ledFadeOutMs) { 
-          fadeState = 3; 
-          fadeStateStartTime = currentMillis; 
-          elapsed = 0; 
-        }
-        
-        if (ledFadeOutMs > 0) {
-          progress = (float)elapsed / ledFadeOutMs;
-        } else {
-          progress = 1.0;
-        }
-        
-        currentBrightness = ledMaxBrightness - (progress * ledMaxBrightness);
-      } else if (fadeState == 3) { 
-        if (elapsed >= ledOffHoldMs) { 
-          if (ledStopPending) {
-            ledStopPending = false;
-            ledMode = 1;
-            ledMaxBrightness = 0;
-            return;
-          }
-          fadeState = 0; 
-          fadeStateStartTime = currentMillis; 
-          elapsed = 0; 
-        }
-        currentBrightness = 0;
+        elapsed -= phaseMs;
+        fadeStateStartTime += phaseMs;
+        fadeState = (fadeState + 1) % 4;
       }
+
+      float level = 0.0;
+      uint16_t phaseMs = fadePhaseMs(fadeState);
+      if (fadeState == 0) {
+        level = (phaseMs > 0) ? (float)elapsed / phaseMs : 1.0;
+      } else if (fadeState == 1) {
+        level = 1.0;
+      } else if (fadeState == 2) {
+        level = (phaseMs > 0) ? 1.0 - (float)elapsed / phaseMs : 0.0;
+      }
+      if (level < 0.0) level = 0.0;
+      if (level > 1.0) level = 1.0;
+
+      // Gamma 2.2 so the fade looks even to the eye instead of rushing
+      // through the dim end and lingering near full brightness.
+      uint8_t currentBrightness = (uint8_t)(ledMaxBrightness * powf(level, 2.2f) + 0.5f);
 
       strip.setBrightness(currentBrightness);
       for(int i = 0; i < kNumLeds; i++) {
@@ -689,10 +681,13 @@ void clearConfig() {
   saveConfig();
 }
 
-void scaleTask() {
-  if (scale.wait_ready_timeout(kScaleMeasurementWaitTimeMs, kScaleWaitDelayMs)) {
-    lastScaleReading = scale.get_units(kScaleReadingsPerMeasurement);
+// Returns true if a reading was taken; never waits for the HX711.
+bool scaleTask() {
+  if (!scale.is_ready()) {
+    return false;
   }
+  lastScaleReading = scale.get_units(kScaleReadingsPerMeasurement);
+  return true;
 }
 
 void uiTask() {
@@ -729,6 +724,12 @@ void processCommBus() {
     }
     
     char c = Serial1.read();
+
+    // '*' and '$' only ever start a packet: drop any partial or noisy bytes
+    // before them, so line noise can't spoil the next good packet.
+    if (c == '*' || c == '$') {
+      commBusBufferLocation = 0;
+    }
     
     if (commBusBufferLocation < (kInputBufferSize - 1)) {
       commBusInputLineBuffer[commBusBufferLocation] = c;

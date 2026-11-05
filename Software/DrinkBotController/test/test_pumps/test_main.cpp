@@ -157,7 +157,8 @@ void test_three_failed_polls_mark_pump_missing() {
   rig.discover();
   rig.manager.setPollingEnabled(true);
   rig.sim.setMissing(2, true);
-  rig.run(30000);
+  // 3 polls x 3 attempts x 3.5 s bridge timeout, plus the poll interval
+  rig.run(45000);
   TEST_ASSERT_FALSE(rig.manager.find(2)->present);
   TEST_ASSERT_TRUE(rig.errors.has(ErrorCode::PumpMissing, 2));
 }

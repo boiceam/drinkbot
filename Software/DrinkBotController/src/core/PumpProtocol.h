@@ -6,7 +6,7 @@
 
 namespace drinkbot {
 
-// Wire protocol to DrinkBotPump firmware >= 0.4.0 (SPEC_v3 §5, §6).
+// Wire protocol to DrinkBotPump firmware >= 0.5.0 (SPEC_v3 §5, §6).
 
 enum class ResultCode : uint8_t { Ok, Err, Invalid, Timeout };
 
@@ -80,9 +80,10 @@ bool parseStatus(const TxnResult& result, PumpMotion& motion, uint32_t& remainin
 // ("0.3.0-sim" == "0.3.0"). Returns <0, 0 or >0.
 int compareVersions(const std::string& a, const std::string& b);
 
-// 0.4.0: `dispense <ms>` takes a run time, not a volume. An older pump would
-// read the run time as millilitres, so it must never be sent one.
-constexpr const char* kMinPumpFirmware = "0.4.0";
+// 0.4.0: `dispense <ms>` takes a run time, not a volume; an older pump would
+// read the run time as millilitres. 0.5.0: RS485 at 9600 baud (all pumps on a
+// bus must match) and a 3 s bridge timeout, which kBridgeTimeoutMs relies on.
+constexpr const char* kMinPumpFirmware = "0.5.0";
 // Longest single run the pump firmware accepts (kMaxMotionMs, PF-3)
 constexpr uint32_t kMaxPumpRunMs = 120000;
 constexpr int kBroadcastId = 255;

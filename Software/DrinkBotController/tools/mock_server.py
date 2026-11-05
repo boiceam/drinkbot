@@ -424,7 +424,7 @@ class Sim(object):
             dens = pc["densityGPerMl"] if pc else 1.0
             prev = old.get(pid)
             self.pumps[pid] = {
-                "pumpId": pid, "fwVersion": "0.4.0-sim", "isBridge": idx == 0,
+                "pumpId": pid, "fwVersion": "0.5.0-sim", "isBridge": idx == 0,
                 "weightG": prev["weightG"] if prev else round(750 * dens * random.uniform(0.3, 1.0), 1),
                 "activity": "IDLE", "motion": None,
                 "led": {"r": 0, "g": 0, "b": 0, "mode": 1, "brightness": 0},
@@ -1054,11 +1054,14 @@ class Sim(object):
             cmd = str(msg.get("command", "")).strip()
             if not cmd or len(cmd) > 63:
                 raise ReqError("INVALID", "command must be 1-63 chars")
+            if cmd.split()[0] in ("dispense", "prime", "purge", "bridge"):
+                # One pump at a time (D-7): raw motion would bypass that rule
+                raise ReqError("INVALID", "Use Prime / Purge or a recipe to run a pump")
             self.pump_cmd(pid, cmd)
             word = cmd.split()[0]
             p = self.pumps[pid]
             lines = {
-                "version": ["P,VER,0.4.0-sim", "R,OK"],
+                "version": ["P,VER,0.5.0-sim", "R,OK"],
                 "gid": ["P,ID,%d" % pid, "R,OK"],
                 "weight": ["P,WEIGHT,%.6f" % p["weightG"], "R,OK"],
                 "status": ["P,STATUS,%s,%d" % (p["motion"]["dir"] if p["motion"] else "IDLE",

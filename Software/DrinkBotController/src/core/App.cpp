@@ -430,11 +430,19 @@ void App::handle(Command& cmd) {
       }
       return;
 
-    case T::PumpRaw:
+    case T::PumpRaw: {
+      // Only one pump may run at a time (power budget, D-7). A raw motion
+      // command would run a pump the controller doesn't track, so refuse it.
+      std::string first = cmd.text.substr(0, cmd.text.find(' '));
+      if (first == "dispense" || first == "prime" || first == "purge" || first == "bridge") {
+        reply(cmd, failure(ErrCode::kInvalid, "Use Prime / Purge or a recipe to run a pump"));
+        return;
+      }
       if (guardIdle(cmd)) {
         runMaintenance(cmd, {cmd.text});
       }
       return;
+    }
 
     case T::SimFault:
       handleSimFault(cmd);

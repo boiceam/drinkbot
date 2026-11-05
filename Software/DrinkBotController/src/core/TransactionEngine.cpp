@@ -21,7 +21,7 @@ TransactionEngine::TransactionEngine(IPumpTransport& transport, const IClock& cl
 
 TransactionEngine::RetryClass TransactionEngine::classify(const std::string& command) {
   std::string cmd = firstToken(command);
-  if (cmd == "version" || cmd == "gid" || cmd == "weight" || cmd == "gmilli" || cmd == "status") {
+  if (cmd == "version" || cmd == "gid" || cmd == "weight" || cmd == "status") {
     return RetryClass::ReadOnly;
   }
   if (cmd.rfind("led", 0) == 0) {
@@ -33,7 +33,7 @@ TransactionEngine::RetryClass TransactionEngine::classify(const std::string& com
   if (cmd == "stop") {
     return RetryClass::Stop;
   }
-  // smilli, tare, cal, sid, scfg and raw maintenance commands: report, don't retry
+  // tare, cal, sid, scfg and raw maintenance commands: report, don't retry
   return RetryClass::None;
 }
 
@@ -124,7 +124,10 @@ void TransactionEngine::start(std::shared_ptr<Request> req) {
   // A broadcast is answered by the bridge itself, like a direct command
   bool bridgedReply = !direct && req->pumpId != kBroadcastId;
   parser_.begin(bridgedReply);
-  deadline_ = clock_.nowMs() + (bridgedReply ? kBridgeTimeoutMs : kDirectTimeoutMs);
+  std::string cmd = firstToken(req->command);
+  bool slow = cmd == "tare" || cmd == "cal";
+  uint32_t timeoutMs = bridgedReply ? kBridgeTimeoutMs : (slow ? kSlowDirectTimeoutMs : kDirectTimeoutMs);
+  deadline_ = clock_.nowMs() + timeoutMs;
   current_ = std::move(req);
 }
 

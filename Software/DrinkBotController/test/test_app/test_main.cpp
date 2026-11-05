@@ -388,6 +388,11 @@ void test_maintenance_raw_and_set_id() {
   TEST_ASSERT_TRUE(r.ok);
   TEST_ASSERT_EQUAL_STRING("P,ID,4", r.lines[0].c_str());
 
+  // Motion through the raw console would bypass the one-pump-at-a-time rule
+  raw.text = "prime 1000";
+  TEST_ASSERT_EQUAL_STRING("INVALID", rig.send(raw).code.c_str());
+  TEST_ASSERT_EQUAL(0, rig.countPrefix("bridge 4 prime"));
+
   Command id = make(Command::Type::PumpSetId);
   id.pumpId = 4;
   id.newId = 9;
@@ -397,6 +402,24 @@ void test_maintenance_raw_and_set_id() {
   TEST_ASSERT_NOT_NULL(rig.app.config().findPumpById(9));
   rig.run(5000);
   TEST_ASSERT_TRUE(rig.app.pumps().find(9)->present);
+}
+
+// tare / cal block a pump for ~1.8 s; the direct (bridge pump) request used
+// to time out after 500 ms
+void test_tare_and_cal_wait_for_slow_scale() {
+  Rig rig;
+  Command tare = make(Command::Type::PumpTare);
+  tare.pumpId = 1;  // bridge pump: direct
+  CommandResult r = rig.send(tare);
+  TEST_ASSERT_TRUE_MESSAGE(r.ok, r.message.c_str());
+  tare.pumpId = 2;  // bridged
+  r = rig.send(tare);
+  TEST_ASSERT_TRUE_MESSAGE(r.ok, r.message.c_str());
+  Command cal = make(Command::Type::PumpCalibrate);
+  cal.pumpId = 1;
+  cal.number = 100;
+  r = rig.send(cal);
+  TEST_ASSERT_TRUE_MESSAGE(r.ok, r.message.c_str());
 }
 
 void test_reboot_requires_force_while_busy() {
@@ -536,6 +559,7 @@ int main() {
   RUN_TEST(test_save_config_validates_and_applies);
   RUN_TEST(test_selection_commands);
   RUN_TEST(test_maintenance_raw_and_set_id);
+  RUN_TEST(test_tare_and_cal_wait_for_slow_scale);
   RUN_TEST(test_reboot_requires_force_while_busy);
   return UNITY_END();
 }
