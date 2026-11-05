@@ -21,9 +21,9 @@ const char kConfig[] = R"json({
                 "minVolumeMl": 10, "maxVolumeMl": 1000 },
   "defaults": { "volumeMl": 250, "recipeId": "margarita", "primeSec": 5, "purgeSec": 10 },
   "pumps": [
-    { "pumpId": 1, "liquid": "Tequila", "msPerMl": 20, "densityGPerMl": 0.95, "color": [255,160,0], "autoPrimeSec": 4 },
-    { "pumpId": 2, "liquid": "Triple Sec", "msPerMl": 20, "densityGPerMl": 1.05, "color": [255,120,0], "autoPrimeSec": 0 },
-    { "pumpId": 4, "liquid": "Lime Juice", "msPerMl": 20, "densityGPerMl": 1.0, "color": [0,255,0], "autoPrimeSec": 2 }
+    { "pumpId": 1, "liquid": "Tequila", "msPerMl": 100, "densityGPerMl": 0.95, "color": [255,160,0], "autoPrimeSec": 4 },
+    { "pumpId": 2, "liquid": "Triple Sec", "msPerMl": 100, "densityGPerMl": 1.05, "color": [255,120,0], "autoPrimeSec": 0 },
+    { "pumpId": 4, "liquid": "Lime Juice", "msPerMl": 100, "densityGPerMl": 1.0, "color": [0,255,0], "autoPrimeSec": 2 }
   ],
   "recipes": [
     { "id": "margarita", "name": "Margarita", "ingredients": [
@@ -184,13 +184,14 @@ void test_dispense_pours_each_ingredient_in_order() {
   }
   TEST_ASSERT_TRUE(rig.rec.dispense.back().status == DispenseProgress::Status::Complete);
 
-  TEST_ASSERT_FLOAT_WITHIN(0.1f, 125 * 0.95f, t0 - rig.sim.weight(1));
-  TEST_ASSERT_FLOAT_WITHIN(0.1f, 62.5f * 1.05f, s0 - rig.sim.weight(2));
-  TEST_ASSERT_FLOAT_WITHIN(0.1f, 62.5f, l0 - rig.sim.weight(4));
-  // Pump firmware 0.4.0: dispense takes the run time (ml x msPerMl 20)
+  // 0.5 g: float rounding over 12500 one-millisecond simulator steps
+  TEST_ASSERT_FLOAT_WITHIN(0.5f, 125 * 0.95f, t0 - rig.sim.weight(1));
+  TEST_ASSERT_FLOAT_WITHIN(0.5f, 62.5f * 1.05f, s0 - rig.sim.weight(2));
+  TEST_ASSERT_FLOAT_WITHIN(0.5f, 62.5f, l0 - rig.sim.weight(4));
+  // Pump firmware 0.4.0: dispense takes the run time (ml x msPerMl 100)
   TEST_ASSERT_EQUAL(0, rig.countPrefix("smilli") + rig.countPrefix("bridge 2 smilli"));
-  TEST_ASSERT_EQUAL(1, rig.count("dispense 2500 3"));
-  TEST_ASSERT_EQUAL(1, rig.count("bridge 2 dispense 1250 3"));
+  TEST_ASSERT_EQUAL(1, rig.count("dispense 12500 3"));
+  TEST_ASSERT_EQUAL(1, rig.count("bridge 2 dispense 6250 3"));
   TEST_ASSERT_EQUAL(0, rig.app.system().errors().size());
 }
 

@@ -43,7 +43,7 @@ SimPumpLink::SimPumpLink(const IClock& clock, std::vector<PumpSpec> pumps) : clo
 std::vector<SimPumpLink::PumpSpec> SimPumpLink::specsFromConfig(const Config& config) {
   std::vector<PumpSpec> specs;
   for (const auto& pc : config.pumps) {
-    specs.push_back({pc.pumpId, pc.densityGPerMl, pc.msPerMl});
+    specs.push_back({pc.pumpId, pc.densityGPerMl, kNominalMsPerMl});
   }
   for (int id = 1; id <= kPumpCount && specs.size() < static_cast<size_t>(kPumpCount); id++) {
     bool used = std::any_of(specs.begin(), specs.end(), [id](const PumpSpec& s) { return s.id == id; });

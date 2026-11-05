@@ -42,6 +42,10 @@ FW_VERSION = "0.1.0-mock"
 BUILD_DATE = time.strftime("%Y-%m-%d %H:%M")
 LEVELS = ["ERROR", "WARN", "INFO", "DEBUG", "VERBOSE"]
 BULK_GAP_MS = 500
+# Nominal flow of the physical pump: 600 ml/min = 100 ms/ml. Simulated pumps move
+# liquid at this rate whatever the config's msPerMl says (that is the calibration).
+NOMINAL_ML_PER_MIN = 600.0
+NOMINAL_MS_PER_ML = 60000.0 / NOMINAL_ML_PER_MIN
 MANUAL_RUN_MS = 120000  # manual prime/purge runs for the pump's longest allowed run (kMaxMotionMs)
 SEVERITY = {
     "E_USB_LOST": "blocking", "E_BRIDGE_UNRESPONSIVE": "blocking",
@@ -55,14 +59,15 @@ WEB_DIR = ""
 
 def default_config():
     pumps = [
-        (1, "Tequila", 95, 0.95, [255, 160, 0], 4.0),
-        (2, "Triple Sec", 90, 1.05, [255, 120, 40], 3.0),
-        (3, "Lime Juice", 80, 1.03, [120, 255, 40], 3.0),
-        (4, "Grapefruit Soda", 70, 1.02, [255, 90, 120], 2.5),
-        (5, "Vodka", 95, 0.95, [180, 220, 255], 4.0),
-        (6, "Gin", 95, 0.94, [90, 160, 255], 0),
-        (7, "Tonic", 70, 1.03, [220, 255, 255], 2.0),
-        (8, "Cranberry", 85, 1.04, [200, 0, 40], 3.5),
+        # msPerMl 100 = calibrated to the pump's nominal 600 ml/min
+        (1, "Tequila", 100, 0.95, [255, 160, 0], 4.0),
+        (2, "Triple Sec", 100, 1.05, [255, 120, 40], 3.0),
+        (3, "Lime Juice", 100, 1.03, [120, 255, 40], 3.0),
+        (4, "Grapefruit Soda", 100, 1.02, [255, 90, 120], 2.5),
+        (5, "Vodka", 100, 0.95, [180, 220, 255], 4.0),
+        (6, "Gin", 100, 0.94, [90, 160, 255], 0),
+        (7, "Tonic", 100, 1.03, [220, 255, 255], 2.0),
+        (8, "Cranberry", 100, 1.04, [200, 0, 40], 3.5),
     ]
     return {
         "schemaVersion": 2,
@@ -578,7 +583,7 @@ class Sim(object):
                     m = p["motion"]
                     if m:
                         pc = self.pump_cfg(pid)
-                        mpm = pc["msPerMl"] if pc else 100
+                        mpm = NOMINAL_MS_PER_ML
                         dens = pc["densityGPerMl"] if pc else 1.0
                         step = min(dt, m["remaining"]) if not m["overrun"] else dt
                         sign = -1 if m["dir"] == "FWD" else 1

@@ -9,11 +9,11 @@
 
 namespace drinkbot {
 
-// XIAO ESP32-S3 pin map (SPEC_v3 §3.2, D-1): wired by D-label.
-// D0..D5 = GPIO 1-6 (skipping D2 / GPIO 3, a strapping pin), D8 = GPIO 7,
-// D9 = GPIO 8, D10 = GPIO 9.
-constexpr std::array<uint8_t, kButtonCount> kButtonPins = {D0, D1, D3, D4, D5, D8, D9};
-constexpr uint8_t kLedDataPin = D10;
+// Panel pin map by ESP32-S3 GPIO number (SPEC_v3 §3.2, D-1). The same GPIOs
+// are used on the YD-ESP32-S3 and the earlier XIAO ESP32-S3 (XIAO D0, D1,
+// D3, D4, D5, D8, D9 and D10). GPIO 3 is a strapping pin and is skipped.
+constexpr std::array<uint8_t, kButtonCount> kButtonPins = {1, 2, 4, 5, 6, 7, 8};
+constexpr uint8_t kLedDataPin = 9;
 
 // 7 active-low buttons with internal pull-ups.
 class Buttons {
@@ -32,7 +32,7 @@ class Buttons {
   }
 };
 
-// 9 WS2812 (GRB, 800 kHz) on D10.
+// 9 WS2812 (GRB, 800 kHz) on GPIO 9.
 class LedStrip {
  public:
   LedStrip() : strip_(kLedCount, kLedDataPin, NEO_GRB + NEO_KHZ800) {}

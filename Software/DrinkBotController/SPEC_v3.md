@@ -4,7 +4,7 @@
 |---|---|
 | **Version** | 3.0 (approved baseline) |
 | **Supersedes** | `SPEC_v2.md`, `SPEC.md` (v1) |
-| **Target hardware** | Seeed Studio XIAO ESP32-S3 |
+| **Target hardware** | VCC-GND Studio YD-ESP32-S3 (N16R8); previously Seeed Studio XIAO ESP32-S3 |
 | **Companion device** | DrinkBotPump (RP2040), firmware ≥ 0.4.0 (see §6) |
 | **Date** | 2026-11-03 |
 
@@ -17,6 +17,7 @@ Requirement keywords: **shall** means mandatory, **may** means optional. Every r
 | 1 | Initial spec (`SPEC.md`). |
 | 2 | Restructured. Added pump protocol details, pump firmware v0.3.0 changes, config schema, state model, WebSocket protocol, error catalog and acceptance tests. |
 | 3 | All v2 recommendations and assumptions approved. PF-9, PF-10 and the AP captive DNS are now required. Added a per-pump `autoPrimeSec` config value, plus **Prime All** and **Purge All** (§9.6.2). |
+| 3.2 | Target board changed to the YD-ESP32-S3 (N16R8). Same button and LED GPIOs; debug log now on the board's CH343 "COM" USB port; 16 MB partition table (§3, §4.1, §4.5). |
 | 3.1 | Manual prime/purge runs until stopped (at most 120 s) with a Stop button, one pump at a time; starting another pump stops the running one first (§9.6.1). Pump firmware 0.4.0: `dispense <ms>` takes a run time, and `smilli`/`gmilli` are removed (PF-11, D-6). |
 
 ---
@@ -54,7 +55,7 @@ There are no open items.
 
 | # | Decision |
 |---|---|
-| D-1 | **Pin map:** the XIAO D-labels are the wiring truth. Button 7 is on D9 (GPIO 8) and NeoPixel data on D10 (GPIO 9). v1's GPIO column had these swapped and is corrected in §3.2. |
+| D-1 | **Pin map:** the ESP32-S3 GPIO numbers in §3.2 are the wiring truth. They are the GPIOs behind the original XIAO D-labels (button 7 on GPIO 8, NeoPixel data on GPIO 9; v1 had these swapped) and are kept unchanged on the YD-ESP32-S3. |
 | D-2 | **USB power:** the bridge pump is **self-powered**. The USB link carries data only (§3.1). |
 | D-3 | **Pump idle LEDs:** **off** when the level is OK. Only low, empty, dispense and prime/purge states light them (§11). |
 | D-4 | **Clearing latched errors without a browser:** hold the `estop` button for **3 s** (§10.1). |
@@ -92,14 +93,14 @@ There are no open items.
 
 ## 2. System Overview
 
-The DrinkBotController is a XIAO ESP32-S3 that dispenses mixed drinks. It does this by telling a set of DrinkBotPump nodes, one at a time, to pour set volumes in a set order. It has a physical UI (7 buttons and 9 NeoPixels) and a self-hosted web app reached over Wi-Fi.
+The DrinkBotController is a YD-ESP32-S3 board that dispenses mixed drinks. It does this by telling a set of DrinkBotPump nodes, one at a time, to pour set volumes in a set order. It has a physical UI (7 buttons and 9 NeoPixels) and a self-hosted web app reached over Wi-Fi.
 
 ```
                       Wi-Fi (STA or AP "DrinkBot")
-   Browser  <------------------------------------------->  XIAO ESP32-S3 (DrinkBotController)
+   Browser  <------------------------------------------->  YD-ESP32-S3 (DrinkBotController)
    (web app, WebSocket JSON)                                 |  7 buttons, 9 NeoPixels
-                                                             |  UART0 debug log (D6/D7)
-                                                             | USB-C (host mode, CDC-ACM)
+                                                             |  UART0 debug log ("COM" port)
+                                                             | "USB" port (host mode, CDC-ACM)
                                                              v
                                                    DrinkBotPump #A  (the "bridge pump")
                                                    - dispenses its own liquid (direct)
@@ -122,30 +123,33 @@ The DrinkBotController is a XIAO ESP32-S3 that dispenses mixed drinks. It does t
 
 ### 3.1 MCU
 
-- Seeed XIAO ESP32-S3: dual-core 240 MHz, 8 MB flash, 8 MB PSRAM.
-- Native USB-C is set to **USB host** mode, so it **cannot** carry the serial console or normal USB flashing at runtime. See §4.5.
+- VCC-GND Studio **YD-ESP32-S3**, ESP32-S3-WROOM-1 **N16R8**: dual-core 240 MHz, 16 MB flash, 8 MB octal PSRAM. (An N8R2 variant would need the board settings in §4.1 changed.)
+- The board has two USB-C ports:
+  - **"USB"** (native USB, GPIO 19/20) is set to **USB host** mode for the bridge pump, so it **cannot** carry the serial console or normal USB flashing at runtime.
+  - **"COM"** (CH343 USB-UART on UART0, GPIO 43/44) carries the debug log and serial flashing (§4.5).
 - **Power (D-2):**
-  - The bridge pump has its own supply, so the USB link carries data only. The XIAO gets its own 5 V on its 5V pin, or 3.3 V on its 3V3 pin.
+  - The bridge pump has its own supply, so the USB link carries data only. The controller is powered from the "COM" port, or 5 V on its 5V pin, or 3.3 V on its 3V3 pin.
   - The RP2040 USB stack (TinyUSB) forces VBUS-detect, so it enumerates without VBUS.
-  - **Hardware caution:** the XIAO's 5V pin connects to the USB-C VBUS. If the XIAO is fed at 5V and the pump board also drives its USB VBUS from its own rail, the two supplies are tied together. Make sure one of them doesn't drive VBUS: leave VBUS unconnected in the cable/adapter, or make sure the pump's VBUS is input-only. Alternatively, use a common supply for both.
+  - **Hardware caution:** the YD-ESP32-S3 has solder jumpers that tie the "USB" port's VBUS to the board's 5 V rail (the "USB-OTG" pad; check the silkscreen on your revision). Leave it **open** so the controller and the self-powered pump don't drive VBUS against each other, unless the pump side's VBUS is input-only. Alternatively, use a common supply for both.
   - Both boards must share ground (USB GND).
+- The onboard RGB LED (GPIO 48) is not used.
 
 ### 3.2 Pin mapping (corrected — see D-1)
 
-| XIAO Pin | ESP32-S3 GPIO | Function | Config |
+| ESP32-S3 GPIO | Former XIAO pin | Function | Config |
 |---|---|---|---|
-| D0  | GPIO 1  | Button 1 | Input, internal pull-up, active low |
-| D1  | GPIO 2  | Button 2 | Input, internal pull-up, active low |
-| D3  | GPIO 4  | Button 3 | Input, internal pull-up, active low |
-| D4  | GPIO 5  | Button 4 | Input, internal pull-up, active low |
-| D5  | GPIO 6  | Button 5 | Input, internal pull-up, active low |
-| D8  | GPIO 7  | Button 6 | Input, internal pull-up, active low |
-| D9  | GPIO 8  | Button 7 | Input, internal pull-up, active low |
-| D10 | GPIO 9  | NeoPixel data out (9 × WS2812/GRB, 800 kHz) | Output |
-| D6  | GPIO 43 | Debug UART TX (log output, 115200 8N1) | UART0 TX |
-| D7  | GPIO 44 | Debug UART RX (unused / reserved for console) | UART0 RX |
-| D2  | GPIO 3  | Unused (strapping pin, leave unconnected) | — |
-| USB-C | GPIO 19/20 | USB host to bridge pump | USB OTG |
+| GPIO 1  | D0  | Button 1 | Input, internal pull-up, active low |
+| GPIO 2  | D1  | Button 2 | Input, internal pull-up, active low |
+| GPIO 4  | D3  | Button 3 | Input, internal pull-up, active low |
+| GPIO 5  | D4  | Button 4 | Input, internal pull-up, active low |
+| GPIO 6  | D5  | Button 5 | Input, internal pull-up, active low |
+| GPIO 7  | D8  | Button 6 | Input, internal pull-up, active low |
+| GPIO 8  | D9  | Button 7 | Input, internal pull-up, active low |
+| GPIO 9  | D10 | NeoPixel data out (9 × WS2812/GRB, 800 kHz) | Output |
+| GPIO 43 | D6  | Debug UART TX (log output, 115200 8N1); on-board CH343 → "COM" port | UART0 TX |
+| GPIO 44 | D7  | Debug UART RX (unused / reserved for console); on-board CH343 → "COM" port | UART0 RX |
+| GPIO 3  | D2  | Unused (strapping pin, leave unconnected) | — |
+| GPIO 19/20 | USB-C | USB host to bridge pump ("USB" port) | USB OTG |
 
 ### 3.3 Buttons
 
@@ -170,9 +174,9 @@ The DrinkBotController is a XIAO ESP32-S3 that dispenses mixed drinks. It does t
 |---|---|
 | Build system | PlatformIO |
 | Platform | `pioarduino` (Arduino-ESP32 core **3.x** on ESP-IDF 5.x). Needed for the USB-host CDC-ACM driver. |
-| Board | `seeed_xiao_esp32s3` |
+| Board | `esp32-s3-devkitc-1` with N16R8 overrides (16 MB QIO flash, `qio_opi` PSRAM), env `yd_esp32s3` (default). The old XIAO target remains as env `xiao` (`seeed_xiao_esp32s3`). |
 | USB-on-boot | `ARDUINO_USB_MODE=0`, `ARDUINO_USB_CDC_ON_BOOT=0` (frees the USB peripheral for host mode) |
-| Partition table | `default_8MB.csv` (app0 / app1 for OTA, plus a LittleFS data partition) |
+| Partition table | `default_16MB.csv` (app0 / app1 for OTA, 6.25 MB each, plus a 3.4 MB LittleFS data partition). The `xiao` env uses `default_8MB.csv`. |
 | Filesystem | LittleFS. Holds **config only** (§7.1). |
 
 ### 4.2 Libraries
@@ -211,9 +215,9 @@ The DrinkBotController is a XIAO ESP32-S3 that dispenses mixed drinks. It does t
 
 ### 4.5 Flashing & debug
 
-- **First flash:** hold BOOT while plugging the XIAO into a PC. The ROM bootloader enumerates as a USB device regardless of the app's host mode.
+- **First flash:** over the "COM" port (`pio run -e yd_esp32s3 -t upload`). The CH343 auto-reset puts the chip in the bootloader; if it doesn't, hold BOOT, tap RST, then release BOOT.
 - **Updates after that:** OTA from the web UI (§13).
-- **Debug log:** UART0 on D6/D7 at 115200. Use a USB-UART adapter.
+- **Debug log:** UART0 at 115200 on the "COM" port (`pio device monitor`). No separate USB-UART adapter is needed.
 
 ### 4.6 Web assets
 
@@ -688,7 +692,7 @@ After **every** dispense, prime or purge, the pump's idle state is **re-sent**. 
 
 ### 12.3 Sinks
 
-- **UART0** (D6, 115200), synchronous.
+- **UART0** (GPIO 43, 115200; the "COM" port), synchronous.
 - **Ring buffer** of the last 300 lines in PSRAM. Sent to each new WebSocket client as `logHistory`.
 - **WebSocket** broadcast of `log` messages, throttled to 50 messages/s. Overflow is collapsed into a `"... N lines dropped"` notice.
 

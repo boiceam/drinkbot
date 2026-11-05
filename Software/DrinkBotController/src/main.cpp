@@ -33,7 +33,8 @@ class MillisClock : public IClock {
   uint32_t nowMs() const override { return millis(); }
 };
 
-// UART0 on D6 (TX) / D7 (RX), 115200 8N1 (§3.2, §12.3)
+// UART0 on GPIO 43 (TX) / 44 (RX), 115200 8N1 (§3.2, §12.3). On the
+// YD-ESP32-S3 this is wired to the CH343 bridge on the "COM" USB-C port.
 class UartLogSink : public ILogSink {
  public:
   void write(const LogEntry& entry) override { Serial.println(formatLogLine(entry).c_str()); }

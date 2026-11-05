@@ -22,11 +22,16 @@ class SimPumpLink : public IPumpTransport {
   static constexpr uint32_t kBridgeTimeoutMs = 2000;
   static constexpr uint32_t kMaxMotionMs = 120000;
   static constexpr float kStartLevelMl = 750;
+  // Nominal flow of the physical pump: 600 ml/min = 100 ms/ml. The simulated
+  // pumps move liquid at this rate whatever the config's msPerMl says, so a
+  // miscalibrated msPerMl shows up in pour verification as on real hardware.
+  static constexpr float kNominalMlPerMin = 600;
+  static constexpr int kNominalMsPerMl = static_cast<int>(60000 / kNominalMlPerMin);
 
   struct PumpSpec {
     int id = 0;
     float densityGPerMl = 1.0f;
-    int msPerMl = 100;  // true flow rate, used to move liquid while running
+    int msPerMl = kNominalMsPerMl;  // true flow rate, used to move liquid while running
   };
 
   struct LedState {
