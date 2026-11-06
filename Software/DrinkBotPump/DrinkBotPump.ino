@@ -23,10 +23,12 @@
 #include <ArduinoLog.h>
 #include <Adafruit_NeoPixel.h>
 #include <math.h>
+#include <LittleFS.h>
+#include <Updater.h>
 
 // --- Global Constants ---
 constexpr uint32_t kLedBootAnimationTimeMs = 5000;
-constexpr uint32_t kCommBusBaudRate = 9600;
+constexpr uint32_t kCommBusBaudRate = 50000;
 constexpr uint32_t kBridgeTimeoutMs = 3000;  // > the ~1.8 s blocking tare/cal at 10 samples/s
 constexpr uint8_t  kScaleReadingsPerMeasurement = 1;
 constexpr uint32_t kScaleActionWaitTimeMs = 2000;
@@ -65,7 +67,8 @@ constexpr uint32_t kScaleTaskIntervalMs = 200;
 constexpr uint32_t kUiTaskIntervalMs = 2000;
 constexpr uint32_t kLedTaskIntervalMs = 20;
 
-constexpr uint16_t kInputBufferSize = 128;
+constexpr uint16_t kInputBufferSize = 256;  // fits a bridged fwdata chunk
+constexpr uint16_t kMaxBridgeCommand = 200;
 constexpr uint16_t kOutputBufferSize = 512;
 
 constexpr uint8_t kMaxBytesPerCall = 32;
@@ -73,7 +76,11 @@ constexpr uint8_t kMaxTokens = 8;
 constexpr uint8_t kMaxCommandLength = 15;
 
 constexpr uint16_t kConfigEepromAddress = 0;
-const char* kFirmwareVersion = "0.5.0";
+// Identifies a pump image: the update tool reads the version from this tag, and
+// fwend refuses an image without one (a valid sketch that isn't pump firmware).
+// `version` reads from it too, which also keeps the linker from removing it.
+const char kImageTag[] = "DBP-IMAGE:0.6.0";
+const char* kFirmwareVersion = kImageTag + 10;
 
 constexpr uint8_t kPumpEnabled = 1;
 constexpr uint8_t kPumpDisabled = 0;
@@ -92,10 +99,10 @@ uint32_t nextUiTaskTime = 0;
 uint32_t nextLedTaskTime = 0;
 
 char uartInputLineBuffer[kInputBufferSize];
-uint8_t uartBufferLocation = 0;
+uint16_t uartBufferLocation = 0;
 
 char commBusInputLineBuffer[kInputBufferSize];
-uint8_t commBusBufferLocation = 0;
+uint16_t commBusBufferLocation = 0;
 
 char outputBuffer[kOutputBufferSize];
 
@@ -144,6 +151,85 @@ int8_t chaseLedIndex = 0;
 int8_t chaseDirection = 1;
 uint32_t lastChaseStepTime = 0;
 
+
+// --- Firmware update over USB or the bus (see README "Firmware Update") ---
+// The image is staged in LittleFS by the core's Updater; the OTA loader built
+// into every image copies it into place on the next boot (power-fail safe).
+enum FwState : uint8_t { FW_IDLE, FW_RECEIVING, FW_STAGED };
+constexpr uint16_t kFwMaxChunk = 192;  // bytes per fwdata after base64 decoding
+// boot2 and the OTA loader. An image must carry the same bytes as this pump's
+// flash: that rejects junk at the first chunk, and a different core or flash
+// layout, and means an update never rewrites the loader (so it stays power-fail
+// safe). A build with a different core or layout must be flashed over USB.
+constexpr uint32_t kFwLoaderBytes = 0x3000;
+const char kFwTagPrefix[] = "DBP-IMAGE:";
+constexpr uint8_t kFwTagLength = sizeof(kFwTagPrefix) - 1;
+uint8_t fwTagMatched = 0;
+FwState fwState = FW_IDLE;
+uint32_t fwSize = 0;
+uint32_t fwReceived = 0;
+uint16_t fwLastChunk = 0;
+
+int base64Value(char c) {
+  if (c >= 'A' && c <= 'Z') return c - 'A';
+  if (c >= 'a' && c <= 'z') return c - 'a' + 26;
+  if (c >= '0' && c <= '9') return c - '0' + 52;
+  if (c == '+') return 62;
+  if (c == '/') return 63;
+  return -1;
+}
+
+// Decodes standard base64 (with optional '=' padding). Returns the byte
+// count, or -1 on bad input or overflow.
+int base64Decode(const char* in, uint8_t* out, int maxOut) {
+  int len = 0;
+  uint32_t acc = 0;
+  int bits = 0;
+  for (const char* p = in; *p && *p != '='; p++) {
+    int v = base64Value(*p);
+    if (v < 0) return -1;
+    acc = (acc << 6) | v;
+    bits += 6;
+    if (bits >= 8) {
+      bits -= 8;
+      if (len >= maxOut) return -1;
+      out[len++] = (acc >> bits) & 0xFF;
+    }
+  }
+  return len;
+}
+
+// Checks a new chunk at `offset` against the rules above and looks for the tag.
+bool fwCheckChunk(uint32_t offset, const uint8_t* chunk, int n) {
+  const uint8_t* flash = (const uint8_t*)XIP_BASE;
+  for (int i = 0; i < n; i++) {
+    if (offset + i < kFwLoaderBytes && chunk[i] != flash[offset + i]) {
+      return false;
+    }
+    if (fwTagMatched < kFwTagLength) {
+      if (chunk[i] == (uint8_t)kFwTagPrefix[fwTagMatched]) {
+        fwTagMatched++;
+      } else {
+        fwTagMatched = chunk[i] == (uint8_t)kFwTagPrefix[0] ? 1 : 0;
+      }
+    }
+  }
+  return true;
+}
+
+void fwReset() {
+  if (fwState == FW_RECEIVING) {
+    Update.end(false);  // not finished: discards the partial image
+  } else if (fwState == FW_STAGED) {
+    // Un-stage: without the command file the OTA loader boots the current image
+    LittleFS.remove("otacommand.bin");
+  }
+  fwState = FW_IDLE;
+  fwSize = 0;
+  fwReceived = 0;
+  fwLastChunk = 0;
+  fwTagMatched = 0;
+}
 
 void setup() {
   Serial.begin(115200);
@@ -559,6 +645,10 @@ bool startPump(uint8_t direction, uint32_t durationMs) {
     Log.warningln("PUMP - Busy, rejecting new motion command");
     return false;
   }
+  if (fwState != FW_IDLE) {
+    Log.warningln("PUMP - Firmware update in progress, rejecting motion command");
+    return false;
+  }
   if (durationMs == 0 || durationMs > kMaxMotionMs) {
     Log.warningln("PUMP - Invalid motion duration: %l ms", durationMs);
     return false;
@@ -879,6 +969,65 @@ void processCommand(char* buf) {
     writeOutput(outBuf);
   } else if (strncmp("scfg", command, kMaxCommandLength) == 0) {
     saveConfig();
+  } else if (strncmp("fwbegin", command, kMaxCommandLength) == 0 && argCount > 1) {
+    // fwbegin <size> <md5hex>: start receiving an image (uncompressed .bin only)
+    uint32_t size = strtoul(token[1], NULL, 10);
+    fwReset();
+    result = !pumpActive && size > 0 && strlen(token[2]) == 32 && Update.begin(size) && Update.setMD5(token[2]);
+    if (result) {
+      fwState = FW_RECEIVING;
+      fwSize = size;
+    } else {
+      fwReset();
+    }
+  } else if (strncmp("fwdata", command, kMaxCommandLength) == 0 && argCount > 1) {
+    // fwdata <offset> <base64>: chunks must arrive in order. A repeat of the
+    // last chunk (a retry after a lost reply) is acknowledged, not rewritten.
+    uint32_t offset = strtoul(token[1], NULL, 10);
+    uint8_t chunk[kFwMaxChunk];
+    int n = base64Decode(token[2], chunk, sizeof(chunk));
+    if (fwState != FW_RECEIVING || n <= 0) {
+      result = false;
+    } else if (offset == fwReceived && fwReceived + n <= fwSize) {
+      result = fwCheckChunk(offset, chunk, n) && Update.write(chunk, n) == (size_t)n;
+      if (result) {
+        fwReceived += n;
+        fwLastChunk = n;
+      } else {
+        fwReset();
+      }
+    } else if (offset + n == fwReceived && n == fwLastChunk) {
+      result = true;
+    } else {
+      result = false;
+    }
+  } else if (strncmp("fwend", command, kMaxCommandLength) == 0) {
+    // Verifies size and MD5, then stages the image for the OTA loader
+    // Safe to repeat: a retry after a lost reply must not un-stage the image
+    if (fwState != FW_STAGED) {
+      result = fwState == FW_RECEIVING && fwReceived == fwSize && fwTagMatched == kFwTagLength && Update.end();
+      if (result) {
+        fwState = FW_STAGED;
+      } else {
+        fwReset();
+      }
+    }
+  } else if (strncmp("fwapply", command, kMaxCommandLength) == 0) {
+    // Reply first, then reboot into the OTA loader, which installs the image
+    if (fwState == FW_STAGED && !pumpActive) {
+      writeOutput("R,OK\n");
+      Serial.flush();
+      delay(100);
+      rp2040.reboot();
+    }
+    result = false;
+  } else if (strncmp("fwabort", command, kMaxCommandLength) == 0) {
+    fwReset();
+  } else if (strncmp("fwstat", command, kMaxCommandLength) == 0) {
+    static const char* kNames[] = { "IDLE", "RECEIVING", "STAGED" };
+    char outBuf[64];
+    sprintf(outBuf, "P,FW,%s,%lu,%lu\n", kNames[fwState], (unsigned long)fwReceived, (unsigned long)fwSize);
+    writeOutput(outBuf);
   } else if (strncmp("version", command, kMaxCommandLength) == 0) {
     char version[16];
     sprintf(version, "P,VER,%s\n", kFirmwareVersion);
@@ -887,7 +1036,7 @@ void processCommand(char* buf) {
     int targetAddr = atoi(token[1]);
     bool isBroadcast = (targetAddr == kBroadcastAddress);
 
-    char bridgeCmd[64];
+    char bridgeCmd[kMaxBridgeCommand + 1];
     bridgeCmd[0] = '\0';
 
     for (int i = 2; i < count; i++) {
@@ -917,11 +1066,11 @@ void processCommand(char* buf) {
       return;
     }
 
-    char crcData[128];
+    char crcData[kMaxBridgeCommand + 32];
     sprintf(crcData, "*[%d|%s|", targetAddr, bridgeCmd);
     uint32_t crc = calculateCRC32(crcData, strlen(crcData));
 
-    char packet[128];
+    char packet[kMaxBridgeCommand + 48];
     sprintf(packet, "%s%08lX]", crcData, (unsigned long)crc);
 
 #if defined(DEBUG_RP2040_PORT)

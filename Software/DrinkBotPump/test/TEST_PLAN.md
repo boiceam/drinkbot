@@ -1,4 +1,4 @@
-# DrinkBotPump Firmware 0.5.0 — Hardware Test Plan
+# DrinkBotPump Firmware 0.6.0 — Hardware Test Plan
 
 This plan verifies the pump firmware on real boards before the controller (YD-ESP32-S3) exists. The PC stands in for the controller: it talks to each pump over USB and uses one pump as the RS485 bridge to the other.
 
@@ -16,7 +16,7 @@ Most checks are automatic (`pump_test.py` sends commands and checks replies, CRC
 | Power | Each pump's motor supply connected as in normal use. |
 | Liquid | Optional. Pump intake in a cup of water and outlet over another cup makes direction checks easy. Running dry is fine if your pump tolerates it; runs are short. |
 | Scale | Load cell mounted, with the empty container on it. A known weight (e.g. 100–500 g object weighed on a kitchen scale) for calibration. |
-| Firmware | 0.5.0, built with **Tools → Debug Port = Disabled**. The script refuses to run on other versions. Every pump on a bus must run the same version (0.5.0 moved the bus to 9600 baud). |
+| Firmware | 0.6.0, built with **Tools → Debug Port = Disabled** and **Flash Size = 2MB (Sketch: 1536KB, FS: 512KB)**. The script refuses to run on other versions. Every pump on a bus must run the same version (0.5.0 moved the bus to 9600 baud). |
 
 **Flashing:** in the Arduino IDE open `DrinkBotPump.ino`, board *Raspberry Pi Pico*, Debug Port *Disabled*, Upload. (Claude can also flash from the command line with the IDE's bundled `arduino-cli`.)
 
@@ -36,10 +36,10 @@ Answer prompts with `y` (pass), `n` (fail, then describe what you saw) or `s` (s
 
 | # | Test | Method | Pass criteria |
 |---|---|---|---|
-| T0 | Identify & versions | Auto + you | Both report `P,VER,0.5.0`. A lights green, B lights blue so you can label them. |
+| T0 | Identify & versions | Auto + you | Both report `P,VER,0.6.0`. A lights green, B lights blue so you can label them. |
 | T1 | Clean USB output | Auto | No unsolicited bytes on either USB port while idle (proves Debug Port = Disabled). |
 | T2 | ID assignment | Auto | `sid 0`, `sid 255`, `sid 300` → `R,ERR`. `sid <n>` → `R,OK`, `gid` → `P,ID,<n>`, `scfg` → `R,OK`. A and B get distinct IDs. |
-| T3 | Command parser | Auto | Unknown command → `R,INVLD`; blank line → no reply; `\r\n` endings work; missing argument → `R,INVLD`; a 200-char line doesn't hang the parser. |
+| T3 | Command parser | Auto | Unknown command → `R,INVLD`; blank line → no reply; `\r\n` endings work; missing argument → `R,INVLD`; a 400-char line doesn't hang the parser. |
 | T4 | Motion limits | Auto | `dispense/prime/purge 0`, `… 120001`, `dispense abc` → `R,ERR`, pump stays `IDLE`. |
 | T5 | Forward run & timing | Auto + you | `dispense 3000` → `R,OK`, `status` = `FWD`, ends at 3000 ms ±100 ms. You confirm the motor ran forward. |
 | T6 | Reverse, busy, stop | Auto + you | `purge` → `REV` (you confirm reverse); a second motion while running → `R,ERR`; `stop` → `IDLE` immediately. |
@@ -48,7 +48,7 @@ Answer prompts with `y` (pass), `n` (fail, then describe what you saw) or `s` (s
 | T9 | Dispense LED mode | Auto + you | `dispense 4000 3` chases during the run and the LEDs go dark when it ends. |
 | T10 | Scale | Auto + you | `weight` is a number; `tare` → ≈0 g; `cal <W>` with the known weight → reads W ±1%; removed → ≈0 g; 10-reading noise < 1 g. Records how long `tare` takes. |
 | T11 | Bridge A → B | Auto + you | `bridge B version/gid/status/weight` return `$[...]` packets with valid CRC32 ending in `$[R,OK|…]`; bridged `dispense` runs B (confirmed on B's own USB); bad bridged commands → `$[R,INVLD]` / `$[R,ERR]`. |
-| T12 | Bridge errors | Auto | Absent ID → `R,TIMEOUT` after 3 s ±0.3 s; own ID, 0, 256 → `R,ERR`; second request while one is pending → `R,ERR`; >63-char command → `R,ERR`; nested `bridge` over the bus → `$[R,INVLD]`. B's USB stays silent throughout. |
+| T12 | Bridge errors | Auto | Absent ID → `R,TIMEOUT` after 3 s ±0.3 s; own ID, 0, 256 → `R,ERR`; second request while one is pending → `R,ERR`; >200-char command → `R,ERR`; nested `bridge` over the bus → `$[R,INVLD]`. B's USB stays silent throughout. |
 | T13 | Bridged tare / cal | Auto | `bridge B tare` and `bridge B cal` return `$[R,OK]` before the 3 s bridge timeout (they take ≈1.8 s). |
 | T14 | Broadcast (255) | Auto + you | `bridge 255 ledcolor/ledmode` changes both pumps, reply is only the local `R,OK`; `bridge 255 stop` stops B (over the bus) and, separately, A (locally) — one running at a time; `bridge 255 prime 1000` and `bridge 255 version` → `R,ERR` and B doesn't move. |
 | T15 | Bridge B → A | Auto | T11's basic checks with the roles swapped (both RS485 directions work). |
@@ -70,8 +70,18 @@ The report lists every check as PASS / FAIL / SKIP with the actual replies and t
 | Date | Firmware | Finding |
 |---|---|---|
 | 2026-11-05 | 0.4.0 | 106/114 pass. Bus at 115200: 0 errors with motors off; 0.013% with one motor running; ~0.4% with two (bit flips, all caught by CRC). Bridged tare 1.8 s vs a 2 s bridge timeout. A packet right after power-up noise was lost. Fade glitch at phase boundaries. Scale signal far too small (wiring under investigation). → fixed in 0.5.0 except the scale. |
+| 2026-11-05 | 0.5.0 | Bus at 9600 baud: 0 errors in 2,335 requests with one motor running, about 68 ms per bridged request. |
+| 2026-11-05 | 0.6.0 | Bus at 50 kbaud: 0 errors in 16,922 requests with one motor running, about 14 ms per bridged request. Firmware update through the bus: 118 KB in 44 s with no retries (213 s at 9600). |
 
-## 7. Out of scope here
+## 7. Firmware update tests
+
+| # | Test | Method | Pass criteria |
+|---|---|---|---|
+| F1 | Bad input | Auto | Out-of-order and malformed chunks, wrong MD5, junk, compressed, other-layout and untagged images are all refused and nothing is staged. Motor commands are refused during an update. |
+| F2 | Full update | `pump_update.py` | Over USB and through the bus: the version changes, the ID stays, no pump needs USB recovery. |
+| F3 | Power cuts | `fw_interrupt_test.py` (guided) | A cut during a transfer leaves the old firmware running. A cancelled image doesn't install. A staged image installs on the next boot. A cut during the install completes on the next power-up. |
+
+## 8. Out of scope here
 
 - CRC-mismatch rejection on the bus (needs a raw RS485 adapter to inject bad packets; covered by code review).
 - Multi-drop with more than two pumps on one bus — run once all eight have IDs, after this plan, by chaining them and bridging to each ID from A.

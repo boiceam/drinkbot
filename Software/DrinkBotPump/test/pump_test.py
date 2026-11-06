@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive hardware test for DrinkBotPump firmware 0.5.0 (see TEST_PLAN.md).
+"""Interactive hardware test for DrinkBotPump firmware 0.6.0 (see TEST_PLAN.md).
 
 Two pumps on USB (A = reference / bridge, B = unit under test), wired to each
 other over RS485. Automatic checks run on their own; the script asks you to
@@ -26,7 +26,7 @@ try:
 except ImportError:
     sys.exit("pyserial is missing: python3 -m pip install pyserial")
 
-EXPECTED_VERSION = "0.5.0"
+EXPECTED_VERSION = "0.6.0"
 BRIDGE_TIMEOUT_S = 3.0
 MAX_MOTION_MS = 120000
 
@@ -387,9 +387,9 @@ def t3_parser(a, b):
             break
     R.check(lines[-1:] == ["R,OK"] and f"P,ID,{b.id}" in lines, "B: CRLF line ending accepted", " / ".join(lines))
     expect(b, "dispense", "R,INVLD", "B: `dispense` without a value → R,INVLD")
-    b.write_raw(b"x" * 200 + b"\n")
+    b.write_raw(b"x" * 400 + b"\n")
     b.drain(0.5)
-    expect(b, "version", "R,OK", "B: still answers after a 200-char line")
+    expect(b, "version", "R,OK", "B: still answers after a 400-char line")
 
 
 def t4_limits(a, b):
@@ -582,8 +582,8 @@ def t12_bridge_errors(a, b, quick=False):
     for target, why in ((a.id, "own ID"), (0, "ID 0"), (256, "ID 256")):
         lines, _ = a.cmd(f"bridge {target} version")
         R.check(final(lines) == "R,ERR", f"A: bridge to {why} → R,ERR", " / ".join(lines))
-    lines, _ = a.cmd("bridge " + str(b.id) + " " + "x" * 70)
-    R.check(final(lines) == "R,ERR", "A: bridged command over 63 chars → R,ERR", " / ".join(lines))
+    lines, _ = a.cmd("bridge " + str(b.id) + " " + "x" * 210)
+    R.check(final(lines) == "R,ERR", "A: bridged command over 200 chars → R,ERR", " / ".join(lines))
     # Two requests back to back: the second is rejected while the first is pending
     a.ser.reset_input_buffer()
     a.write_raw(f"bridge {b.id} weight\nbridge {b.id} version\n".encode())

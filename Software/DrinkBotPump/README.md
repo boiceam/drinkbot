@@ -5,6 +5,7 @@ The `DrinkBotPump` firmware operates a networked liquid dispensing node designed
 ## Hardware & Build Requirements
 
 *   **Target Board:** Raspberry Pi Pico (RP2040)
+*   **Board settings:** Flash Size **2MB (Sketch: 1536KB, FS: 512KB)**, Debug Port **Disabled**. The file system holds incoming firmware updates. FQBN: `rp2040:rp2040:rpipico:dbgport=Disabled,flash=2097152_524288`
 *   **IDE:** Arduino IDE version 2.3.10 or greater
 *   **Required Libraries:**
     *   **HX711** by Rob Tillaart (0.6.x)
@@ -15,7 +16,7 @@ The `DrinkBotPump` firmware operates a networked liquid dispensing node designed
 
 Core behaviors are defined at the top of `DrinkBotPump.ino` using `constexpr` constants for easy modification:
 *   `kLedBootAnimationTimeMs` (Default 5000ms) - Duration of the red boot-up visual.
-*   `kCommBusBaudRate` (Default 9600) - Serial baud rate for RS485 data transmission. Every pump on a bus must use the same rate.
+*   `kCommBusBaudRate` (Default 50000) - Serial baud rate for RS485 data transmission. Every pump on a bus must use the same rate.
 *   `kBridgeTimeoutMs` (Default 3000ms) - Time the pump waits for the final response when acting as a UART-to-RS485 bridge. It must exceed the ~1.8 s that a bridged `tare` or `cal` takes.
 *   `kScaleTaskIntervalMs` / `kScaleReadingsPerMeasurement` - Minimum interval between background weight readings, and readings averaged per pass. The loop never waits for the HX711: it reads only once a sample is ready (10 samples/s).
 *   `kScaleActionWaitTimeMs` / `kScaleCalibrationReadings` - Higher-precision read configurations used strictly when zeroing (tare) or calibrating the scale.
@@ -25,6 +26,27 @@ Core behaviors are defined at the top of `DrinkBotPump.ino` using `constexpr` co
 ## Power: One Pump at a Time
 
 The pump power supply is sized for **one running pump**. The system must never run two pumps at the same time. The firmware doesn't enforce this across the bus (a pump can't see the others' state); the controller, and any test tool, must make sure the previous pump is stopped before starting another.
+
+## Firmware Update
+
+Firmware can be updated over USB or through the RS485 bus, using the core's `Updater` and the OTA loader linked into every image:
+
+```bash
+# Build
+arduino-cli compile -b rp2040:rp2040:rpipico:dbgport=Disabled,flash=2097152_524288 --output-dir build .
+# Update pump 2 through the pump on USB
+python3 tools/pump_update.py build/DrinkBotPump.ino.bin --port /dev/cu.usbmodem14101 --id 2
+# Update the pump on USB itself
+python3 tools/pump_update.py build/DrinkBotPump.ino.bin --port /dev/cu.usbmodem14101
+```
+
+*   **Timing:** about 45 seconds per pump over the bus at 50 kbaud, a few seconds over USB.
+*   **Procedure:** update one pump at a time with no pump running, and update the bridge pump last.
+*   **What the pump checks:** the whole image's MD5; that its first 12 KB (boot2 and the OTA loader) match the pump's own flash; and that it contains a `DBP-IMAGE:<version>` tag. So only uncompressed images built with the same Arduino core and flash layout are accepted. Anything else must be flashed over USB. Updates never rewrite the loader.
+*   **If it's interrupted:** until `fwapply` the current firmware keeps running, and a partial image is simply discarded. A staged image that hasn't been aborted is installed on the next reboot, even without `fwapply`. If power fails during the install, the loader starts it again on the next power-up.
+*   **Recovery:** the RP2040's ROM bootloader can't be overwritten. Hold BOOTSEL while plugging in USB and flash over USB. New firmware that boots but can't talk on the bus needs this too: there's no automatic rollback.
+*   **Compatibility:** every version must keep the bus baud rate and these commands working, or the pumps can't be updated over the bus afterwards.
+*   **Not secured:** any device on the bus can update a pump. The bus is internal to the machine.
 
 ## Debugging Setup
 
@@ -45,7 +67,7 @@ A traditional text-based interface used for direct computer-to-device communicat
 *   **Example Response:** `R,OK\n`
 
 **2. RS485 Shared Bus (CommBus)**
-A robust, addressed, and error-checked protocol at 9600 baud designed for a single master to communicate with multiple slave devices over a shared serial bus operating at the defined `kCommBusBaudRate`. It wraps standard UART commands in a specialized packet structure.
+A robust, addressed, and error-checked protocol at 50 kbaud designed for a single master to communicate with multiple slave devices over a shared serial bus operating at the defined `kCommBusBaudRate`. It wraps standard UART commands in a specialized packet structure.
 *   **Packet Structure:** `*[address|command|CRC32]`
 *   **Response Structure:** `$[response|CRC32]`
 *   **Behavior:** Devices only process packets matching their configured ID (address). Any CRC32 mismatch or unrecognized address is silently ignored.
@@ -64,7 +86,7 @@ Any device connected directly to a computer (or a DrinkBotController) via USB ca
 *   **Rejected with `R,ERR`:**
     *   a target outside 1-255, or the bridge's own ID (address the bridge directly instead);
     *   a request while another bridged request is still pending;
-    *   a bridged command over 63 characters.
+    *   a bridged command over 200 characters.
 *   The host should verify the CRC32 of each forwarded `$[...]` packet. The CRC covers `$[<payload>|`.
 
 **4. Broadcast (address 255)**
@@ -97,11 +119,25 @@ Every motion command is rejected with `R,ERR` if the pump is already running, or
 *   `ledchase <speed> <gradient>`: Set Mode 3 & 4 step speed (ms) and tail gradient length.
 *   `ledtime <ms>`: Start a countdown timer for the specified milliseconds. When the timer expires, the currently active LED animation is allowed to finish its natural cycle before gracefully turning off (resets to Mode 1 at 0 brightness). `ledtime 0` cancels the timer, including the 5 s boot animation timer.
 
+**Firmware Update** (see [Firmware Update](#firmware-update))
+*   `fwbegin <size> <md5hex>`: Start receiving an image. Rejected with `R,ERR` if the pump is running or the image won't fit. Motion commands return `R,ERR` until the update ends.
+*   `fwdata <offset> <base64>`: Next chunk (up to 192 bytes after decoding). Chunks must arrive in order; a repeat of the last chunk is acknowledged, not written twice. `R,ERR` if out of order, or if the first 12 KB don't match this pump's flash, which also ends the update.
+*   `fwend`: Check the size, MD5 and image tag, then stage the image for install. Safe to repeat.
+*   `fwapply`: Reply `R,OK`, then reboot and install the staged image.
+*   `fwabort`: Cancel, including a staged image. Always returns `R,OK`.
+*   `fwstat`: Returns `P,FW,<IDLE|RECEIVING|STAGED>,<received>,<size>`.
+
 **System**
 *   `bridge <id> <command>`: Bridge a standard command to a specific device (or `255` for broadcast) over RS485. See Communication Protocols above.
-*   `version`: Returns firmware version (Returns: `P,VER,0.5.0`).
+*   `version`: Returns firmware version (Returns: `P,VER,0.6.0`).
 
 ## Changelog
+
+**0.6.0**
+*   Firmware update over USB or the RS485 bus: `fwbegin`, `fwdata`, `fwend`, `fwapply`, `fwabort`, `fwstat`, and `tools/pump_update.py`.
+*   RS485 bus runs at **50 kbaud** (was 9600). All pumps on a bus must run 0.6.0.
+*   Needs the new flash layout with a file system: every pump must be flashed once over USB. The ID and scale calibration are kept.
+*   Longer limits: input lines 255 characters, bridged commands 200 characters (was 63).
 
 **0.5.0**
 *   RS485 bus runs at **9600 baud** (was 115200) for better noise immunity. All pumps on a bus must run 0.5.0.

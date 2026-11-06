@@ -11,17 +11,17 @@
 
 namespace drinkbot {
 
-// Simulated bridge pump plus RS485 bus of DrinkBotPump 0.5.0 nodes
+// Simulated bridge pump plus RS485 bus of DrinkBotPump 0.6.0 nodes
 // (SPEC_v3 §16). Speaks the same line protocol as the real firmware,
 // including bridged $[..|crc] replies, R,TIMEOUT and broadcast 255.
 class SimPumpLink : public IPumpTransport {
  public:
   static constexpr int kPumpCount = 8;
   static constexpr uint32_t kDirectLatencyMs = 5;
-  static constexpr uint32_t kBridgedLatencyMs = 60;  // RS485 at 9600 baud
+  static constexpr uint32_t kBridgedLatencyMs = 20;  // RS485 at 50 kbaud
   // tare / cal block the pump while it averages 20 HX711 samples at 10/s
   static constexpr uint32_t kScaleActionMs = 1800;
-  static constexpr uint32_t kBridgeTimeoutMs = 3000;  // firmware 0.5.0
+  static constexpr uint32_t kBridgeTimeoutMs = 3000;  // since firmware 0.5.0
   static constexpr uint32_t kMaxMotionMs = 120000;
   static constexpr float kStartLevelMl = 750;
   // Nominal flow of the physical pump: 600 ml/min = 100 ms/ml. The simulated
@@ -80,7 +80,7 @@ class SimPumpLink : public IPumpTransport {
   struct Pump {
     PumpSpec spec;
     int id = 0;
-    std::string version = "0.5.0-sim";
+    std::string version = "0.6.0-sim";
     float weightG = 0;
     bool missing = false;
     int dropResponses = 0;
