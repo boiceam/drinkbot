@@ -499,11 +499,17 @@ def t10_scale(a, b):
     R.check(final(lines) == "R,OK", "B: `tare` → R,OK", " / ".join(lines))
     R.record("B: tare duration", "PASS", f"{dt * 1000:.0f} ms (bridge timeout is {BRIDGE_TIMEOUT_S * 1000:.0f} ms; see T13)")
     time.sleep(1.0)
+    # Not a pass/fail yet: before calibration the reading may be in raw counts.
+    # "Back to ≈0 g" below checks the tare once the scale is calibrated.
     w0 = read_weight(b)
-    R.check(w0 is not None and abs(w0) < 2.0, "B: ≈0 g after tare", f"{w0}")
+    R.record("B: reading after tare, before calibration", "PASS", f"{w0}")
     known = ask_number("Weight of your known object in grams (s to skip calibration)")
     if known:
         do(f"Place the {known:g} g object on B's scale (keep the container there) and let it settle")
+        time.sleep(1.0)
+        before = read_weight(b)
+        R.record("B: reading with the object, before calibration", "PASS",
+                 f"{before}; on a never-calibrated pump, about {abs(before - (w0 or 0)) / known:.1f} counts/g")
         lines, _ = b.cmd(f"cal {known:g}", 6)
         R.check(final(lines) == "R,OK", f"B: `cal {known:g}` → R,OK", " / ".join(lines))
         time.sleep(1.0)
@@ -739,6 +745,142 @@ def t17_persistence(a, b):
     R.check(payloads[-1:] == ["R,OK"] and crc, "A can still bridge to B after reboot", " / ".join(lines))
 
 
+# ---------------------------------------------------------------- single pump
+
+def settled_weight(p, samples=8):
+    """Average of several readings; the scale makes about 10 new ones a second."""
+    values = []
+    for _ in range(samples):
+        v = read_weight(p)
+        if v is not None:
+            values.append(v)
+        time.sleep(0.25)
+    return statistics.mean(values) if values else None
+
+
+def weigh_object(b, grams, what):
+    """Weighs an object against the empty reading just before it goes on, so a
+    slowly moving zero doesn't count as a weighing error."""
+    zero = settled_weight(b)
+    if not do(f"Place the {what} on B's scale (keep the container there) and let it settle"):
+        return None, zero
+    time.sleep(1.0)
+    loaded = settled_weight(b)
+    return (loaded - zero if loaded is not None and zero is not None else None), zero
+
+
+def scale_linearity(b):
+    known = getattr(b, "known_weight", None)
+    if not known:
+        return
+    heading("S2", "Second weight and stability")
+    second = ask_number(f"Weight of a DIFFERENT known object in grams, ideally not {known:g} (s to skip)")
+    if second:
+        delta, zero = weigh_object(b, second, f"{second:g} g object")
+        R.check(delta is not None and abs(delta - second) <= max(second * 0.01, 1.0),
+                f"B: {second:g} g object adds {second:g} g ±1% (or ±1 g)",
+                f"added {delta:.2f} g, empty reading was {zero:.2f} g" if delta is not None else "")
+        do("Remove the object (leave the container)")
+        time.sleep(1.5)
+    if not do(f"Place the {known:g} g object on B's scale for a 30 s stability check"):
+        return
+    time.sleep(1.0)
+    samples = []
+    t_end = time.monotonic() + 30
+    while time.monotonic() < t_end:
+        samples.append(read_weight(b))
+        time.sleep(0.25)
+    samples = [v for v in samples if v is not None]
+    spread = max(samples) - min(samples)
+    R.check(spread < 3.0, "B: stays within 3 g over 30 s under load",
+            f"spread {spread:.2f} g, std dev {statistics.pstdev(samples):.3f} g, {len(samples)} readings")
+    do("Remove the object (leave the container)")
+    time.sleep(1.5)
+    w = settled_weight(b)
+    # 3 g is about 0.06% of the 5 kg rating, near the hysteresis typical of such cells
+    R.check(w is not None and abs(w) < 3.0, "B: back within 3 g of zero after the load", f"{w:.2f} g")
+
+
+def power_cycle(b):
+    """Returns False if skipped. The scale must stay untouched throughout."""
+    b.close()
+    if not do("Unplug B's USB and motor supply at the FAR end, without touching the pump or scale. Wait 3 s"):
+        b.reopen(b.port)
+        return False
+    t0 = time.monotonic()
+    while find_ports() and time.monotonic() - t0 < 30:
+        time.sleep(0.2)
+    say("Now restore B's motor supply and USB, again without touching the pump.")
+    t0 = time.monotonic()
+    while not find_ports() and time.monotonic() - t0 < 90:
+        time.sleep(0.2)
+    ports = find_ports()
+    if not R.check(len(ports) == 1, "B came back on USB", ", ".join(ports)):
+        raise Abort()
+    time.sleep(6.0)  # past the boot animation
+    b.reopen(ports[0])
+    return True
+
+
+def scale_persistence(b):
+    known = getattr(b, "known_weight", None)
+    if not known:
+        return
+    heading("S3", "Zero and calibration across power cycles")
+    say("Container on, nothing else. Leave the pump and scale completely untouched until asked.")
+    for cycle in (1, 2):
+        before = settled_weight(b)
+        if not power_cycle(b):
+            R.record(f"Power cycle {cycle}", "SKIP")
+            return
+        after = settled_weight(b)
+        time.sleep(20)
+        later = settled_weight(b)
+        R.check(after is not None and abs(after - before) < 5.0, f"Power cycle {cycle}: zero moves under 5 g",
+                f"{before:.2f} → {after:.2f} g, then {later:.2f} g after 20 s more")
+    delta, zero = weigh_object(b, known, f"{known:g} g object (the {known:g} g one, not the other)")
+    if delta is not None:
+        R.check(abs(delta - known) <= max(known * 0.02, 2.0), f"B: {known:g} g object adds {known:g} g ±2% after reboots",
+                f"added {delta:.2f} g, empty reading was {zero:.2f} g")
+        do("Remove the object")
+
+
+def main_scale_only(port):
+    """Direct scale tests on the one pump on USB; no bus, no second pump."""
+    b = Pump(port, "B")
+    print(f"{BOLD}DrinkBotPump {EXPECTED_VERSION} direct scale test{RESET}\nPump on {b.port} (\"B\" in the prompts)")
+    print("Answer prompts as asked, or q to quit and save the report.")
+    aborted = False
+    try:
+        heading("S0", "Firmware")
+        lines, _ = b.cmd("version")
+        if not R.check(f"P,VER,{EXPECTED_VERSION}" in lines, f"Runs {EXPECTED_VERSION}", " / ".join(lines)):
+            raise Abort()
+        lines, _ = b.cmd("gid")
+        m = next((re.fullmatch(r"P,ID,(\d+)", l) for l in lines if l.startswith("P,ID,")), None)
+        b.id = int(m.group(1)) if m else None
+        t10_scale(None, b)
+        scale_linearity(b)
+        scale_persistence(b)
+    except (Abort, KeyboardInterrupt):
+        aborted = True
+        print(f"\n{YELLOW}Stopped early.{RESET}")
+    except (serial.SerialException, OSError) as e:
+        aborted = True
+        R.record("Serial error", "FAIL", str(e))
+    finally:
+        b.close()
+    c = R.counts()
+    out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reports")
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"{R.started.strftime('%Y%m%d-%H%M%S')}_scale_id{b.id}.md")
+    R.write(path, f"- Date: {R.started:%Y-%m-%d %H:%M}\n- Suite: direct scale{' (stopped early)' if aborted else ''}\n"
+                  f"- Pump: ID {b.id} on {b.port}\n- Firmware: {EXPECTED_VERSION}")
+    color = GREEN if c["FAIL"] == 0 else RED
+    print(f"\n{BOLD}{color}{c['PASS']} pass, {c['FAIL']} fail, {c['SKIP']} skip{RESET}\nReport: {path}")
+    sys.exit(1 if c["FAIL"] else 0)
+
+
 # ---------------------------------------------------------------- main
 
 FULL = ["T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10",
@@ -752,7 +894,14 @@ def main():
     ap.add_argument("--b", help="serial port of pump B (unit under test)")
     ap.add_argument("--suite", choices=("full", "quick"), default="full")
     ap.add_argument("--only", help="comma-separated tests, e.g. T5,T11 (T0 and T2 always run)")
+    ap.add_argument("--scale-only", action="store_true", help="direct scale tests on the single pump on USB")
     args = ap.parse_args()
+
+    if args.scale_only:
+        ports = [args.b] if args.b else find_ports()
+        if len(ports) != 1:
+            sys.exit(f"--scale-only needs exactly one pump on USB, found {len(ports)}: {ports}. Use --b to choose.")
+        main_scale_only(ports[0])
 
     ports = [args.a, args.b] if args.a and args.b else find_ports()
     if len(ports) != 2:

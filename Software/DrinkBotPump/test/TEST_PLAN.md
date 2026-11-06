@@ -32,6 +32,8 @@ python3 Software/DrinkBotPump/test/pump_test.py --only T5,T10  # selected tests
 
 Answer prompts with `y` (pass), `n` (fail, then describe what you saw) or `s` (skip). Each run writes a Markdown report to `Software/DrinkBotPump/test/reports/`.
 
+For the scale alone, on a single pump with no bus: `python3 Software/DrinkBotPump/test/pump_test.py --scale-only` (tare, calibration, a second weight, 30 s stability, two untouched power cycles). Weights are measured against the empty reading just before them, because a slow zero shift of a few grams is normal for this cell.
+
 ## 3. Full suite (first pair)
 
 | # | Test | Method | Pass criteria |
@@ -46,7 +48,7 @@ Answer prompts with `y` (pass), `n` (fail, then describe what you saw) or `s` (s
 | T7 | Max run accepted | Auto | `prime 120000` → `R,OK` with ~120000 ms remaining, then `stop`. |
 | T8 | LED commands | You | Solid, fade, loop, bounce in the commanded color; `ledtime` turns the LEDs off after the current cycle; `ledmode 1 0` turns them off. |
 | T9 | Dispense LED mode | Auto + you | `dispense 4000 3` chases during the run and the LEDs go dark when it ends. |
-| T10 | Scale | Auto + you | `weight` is a number; `tare` → ≈0 g; `cal <W>` with the known weight → reads W ±1%; removed → ≈0 g; 10-reading noise < 1 g. Records how long `tare` takes. |
+| T10 | Scale | Auto + you | `weight` is a number; `tare` → `R,OK`; `cal <W>` with the known weight → reads W ±1%; removed → ≈0 g; 10-reading noise < 1 g. Records how long `tare` takes. |
 | T11 | Bridge A → B | Auto + you | `bridge B version/gid/status/weight` return `$[...]` packets with valid CRC32 ending in `$[R,OK|…]`; bridged `dispense` runs B (confirmed on B's own USB); bad bridged commands → `$[R,INVLD]` / `$[R,ERR]`. |
 | T12 | Bridge errors | Auto | Absent ID → `R,TIMEOUT` after 3 s ±0.3 s; own ID, 0, 256 → `R,ERR`; second request while one is pending → `R,ERR`; >200-char command → `R,ERR`; nested `bridge` over the bus → `$[R,INVLD]`. B's USB stays silent throughout. |
 | T13 | Bridged tare / cal | Auto | `bridge B tare` and `bridge B cal` return `$[R,OK]` before the 3 s bridge timeout (they take ≈1.8 s). |
@@ -72,6 +74,13 @@ The report lists every check as PASS / FAIL / SKIP with the actual replies and t
 | 2026-11-05 | 0.4.0 | 106/114 pass. Bus at 115200: 0 errors with motors off; 0.013% with one motor running; ~0.4% with two (bit flips, all caught by CRC). Bridged tare 1.8 s vs a 2 s bridge timeout. A packet right after power-up noise was lost. Fade glitch at phase boundaries. Scale signal far too small (wiring under investigation). → fixed in 0.5.0 except the scale. |
 | 2026-11-05 | 0.5.0 | Bus at 9600 baud: 0 errors in 2,335 requests with one motor running, about 68 ms per bridged request. |
 | 2026-11-05 | 0.6.0 | Bus at 50 kbaud: 0 errors in 16,922 requests with one motor running, about 14 ms per bridged request. Firmware update through the bus: 118 KB in 44 s with no retries (213 s at 9600). |
+| 2026-11-05 | 0.6.0 | New pump with the electrical correction: scale at 377 counts/g, noise 0.12 g idle, 0.34 g motor on, up to 0.48 g LEDs on. Settles within about 2 s. Zero held through two untouched power cycles (under 0.2 g). |
+
+**Open scale items, deferred on 2026-11-05:**
+- Readings run about 2% high after calibration (50 g added 51.06 g, 100 g added 101.78–102.3 g). Settling is ruled out. Next: compare placements on the container, then check the objects' true weights.
+- One unexplained dip in a 60 s hold, consistent with a single bad sample about 730 g off. It didn't repeat in 1,195 samples. Possible safeguard: report the median of the last 3 samples.
+- Readings shift up about 0.5 g with LEDs on.
+- Pumps 1 and 2 (and any others without the correction) have no usable scale signal.
 
 ## 7. Firmware update tests
 
