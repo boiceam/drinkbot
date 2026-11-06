@@ -58,10 +58,13 @@ Config testConfig() {
 struct Rig {
   FakeClock clock;
   Config config = testConfig();
-  SimPumpLink sim{clock, SimPumpLink::specsFromConfig(config)};
+  SimPumpLink sim;
   TransactionEngine engine{sim, clock};
   ErrorRecorder errors;
   PumpManager manager{engine, clock, errors};
+
+  // The final system has a bridge board (ID 0). false: pump 1 is the bridge.
+  explicit Rig(bool bridgeBoard = true) : sim(clock, SimPumpLink::specsFromConfig(config, bridgeBoard)) {}
 
   void run(uint32_t ms) {
     for (uint32_t i = 0; i < ms; i++) {
@@ -109,8 +112,17 @@ struct Rig {
 void setUp() {}
 void tearDown() {}
 
-void test_sim_pads_to_eight_pumps_with_first_as_bridge() {
+void test_sim_puts_bridge_board_ahead_of_eight_pumps() {
   Rig rig;
+  auto ids = rig.sim.pumpIds();
+  TEST_ASSERT_EQUAL(9, ids.size());
+  TEST_ASSERT_EQUAL(0, rig.sim.bridgeId());
+  TEST_ASSERT_EQUAL(0, ids[0]);
+  TEST_ASSERT_EQUAL(1, ids[1]);
+}
+
+void test_sim_pads_to_eight_pumps_with_first_as_bridge() {
+  Rig rig(false);
   auto ids = rig.sim.pumpIds();
   TEST_ASSERT_EQUAL(8, ids.size());
   TEST_ASSERT_EQUAL(1, rig.sim.bridgeId());
@@ -118,8 +130,42 @@ void test_sim_pads_to_eight_pumps_with_first_as_bridge() {
   TEST_ASSERT_EQUAL(3, ids[3]);  // padding fills unused IDs from 1
 }
 
-void test_discovery_routes_bridge_direct_and_others_bridged() {
+void test_discovery_with_bridge_board_bridges_every_pump() {
   Rig rig;
+  rig.discover();
+  TEST_ASSERT_EQUAL(0, rig.manager.bridgeId());
+  TEST_ASSERT_TRUE(rig.manager.bridgeResponding());
+  TEST_ASSERT_EQUAL(1, rig.count("version"));  // the board itself, direct
+  for (const auto& p : rig.manager.pumps()) {
+    TEST_ASSERT_TRUE_MESSAGE(p.present, "pump not present");
+    TEST_ASSERT_FALSE(p.isBridge);  // the board isn't a pump
+  }
+  TEST_ASSERT_EQUAL(1, rig.count("bridge 1 version"));
+  TEST_ASSERT_EQUAL(1, rig.count("bridge 2 version"));
+  TEST_ASSERT_FALSE(rig.errors.has(ErrorCode::PumpFw, kBridgeBoardId));
+  TEST_ASSERT_FALSE(rig.errors.has(ErrorCode::BridgeUnresponsive, 0));
+}
+
+void test_old_bridge_board_firmware_raises_pump_fw() {
+  Rig rig;
+  rig.sim.setFirmwareVersion(0, "0.5.0");
+  rig.discover();
+  TEST_ASSERT_TRUE(rig.errors.has(ErrorCode::PumpFw, 0));
+  rig.sim.setFirmwareVersion(0, "0.7.0-sim");
+  rig.discover();
+  TEST_ASSERT_FALSE(rig.errors.has(ErrorCode::PumpFw, 0));
+}
+
+void test_bridge_board_refuses_motion() {
+  Rig rig;
+  rig.discover();
+  rig.sim.writeLine("prime 1000");
+  rig.run(50);
+  TEST_ASSERT_FALSE(rig.sim.running(0));
+}
+
+void test_discovery_routes_bridge_direct_and_others_bridged() {
+  Rig rig(false);
   rig.discover();
   TEST_ASSERT_EQUAL(1, rig.manager.bridgeId());
   TEST_ASSERT_TRUE(rig.manager.bridgeResponding());
@@ -175,7 +221,7 @@ void test_old_firmware_raises_pump_fw() {
 void test_unresponsive_bridge_is_blocking() {
   Rig rig;
   for (int i = 0; i < 3; i++) {  // first try + 2 retries
-    rig.sim.ignoreNextCommand(1);
+    rig.sim.ignoreNextCommand(0);
   }
   rig.discover();
   TEST_ASSERT_FALSE(rig.manager.bridgeResponding());
@@ -299,6 +345,10 @@ void test_urgent_request_jumps_queue_and_cancel_fails_queued() {
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_sim_pads_to_eight_pumps_with_first_as_bridge);
+  RUN_TEST(test_sim_puts_bridge_board_ahead_of_eight_pumps);
+  RUN_TEST(test_discovery_with_bridge_board_bridges_every_pump);
+  RUN_TEST(test_old_bridge_board_firmware_raises_pump_fw);
+  RUN_TEST(test_bridge_board_refuses_motion);
   RUN_TEST(test_discovery_routes_bridge_direct_and_others_bridged);
   RUN_TEST(test_missing_pump_is_degraded_and_recovers_by_polling);
   RUN_TEST(test_three_failed_polls_mark_pump_missing);

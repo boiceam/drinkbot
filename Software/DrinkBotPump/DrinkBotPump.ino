@@ -36,6 +36,9 @@ constexpr uint8_t  kScaleCalibrationReadings = 20;
 constexpr uint8_t  kScaleWaitDelayMs = 5;
 constexpr uint32_t kMaxMotionMs = 120000;
 constexpr uint8_t  kBroadcastAddress = 255;
+// ID 0 means "not a pump": a dedicated bridge board, or a pump with no ID yet.
+// It relays bus traffic but won't run a motor, and the bus can't address it.
+constexpr uint8_t  kBridgeBoardId = 0;
 
 struct DeviceConfig {
   uint8_t id;
@@ -79,7 +82,7 @@ constexpr uint16_t kConfigEepromAddress = 0;
 // Identifies a pump image: the update tool reads the version from this tag, and
 // fwend refuses an image without one (a valid sketch that isn't pump firmware).
 // `version` reads from it too, which also keeps the linker from removing it.
-const char kImageTag[] = "DBP-IMAGE:0.6.0";
+const char kImageTag[] = "DBP-IMAGE:0.7.0";
 const char* kFirmwareVersion = kImageTag + 10;
 
 constexpr uint8_t kPumpEnabled = 1;
@@ -649,6 +652,10 @@ bool startPump(uint8_t direction, uint32_t durationMs) {
     Log.warningln("PUMP - Firmware update in progress, rejecting motion command");
     return false;
   }
+  if (config.id == kBridgeBoardId) {
+    Log.warningln("PUMP - ID 0 is a bridge board, not a pump: rejecting motion command");
+    return false;
+  }
   if (durationMs == 0 || durationMs > kMaxMotionMs) {
     Log.warningln("PUMP - Invalid motion duration: %l ms", durationMs);
     return false;
@@ -885,9 +892,12 @@ void processCommand(char* buf) {
 
   if (strncmp("sid", command, kMaxCommandLength) == 0 && argCount > 0) {
     int newId = atoi(token[1]);
-    // 0 is the factory default and 255 is the broadcast address
+    // 255 is the broadcast address
     if (newId >= 1 && newId <= 254) {
       config.id = newId;
+    } else if (strcmp(token[1], "0") == 0 && currentCommandSource == SRC_UART) {
+      // USB only: over the bus this would leave a pump nothing can address
+      config.id = kBridgeBoardId;
     } else {
       result = false;
     }

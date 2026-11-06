@@ -7,7 +7,7 @@ that pump as a bridge to the pump with that ID.
   pump_update.py DrinkBotPump.ino.bin --port /dev/cu.usbmodem14101 --id 2
   pump_update.py DrinkBotPump.ino.bin --port /dev/cu.usbmodem14101
 
-Update one pump at a time, with no pump running. Update the bridge pump last.
+Update one pump at a time, with no pump running. Update the bridge last.
 Stopping at any point before the install leaves the current firmware running.
 
 The image must be the uncompressed .bin of a DrinkBotPump build (0.6.0 or newer)

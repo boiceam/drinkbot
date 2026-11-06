@@ -114,7 +114,7 @@ void PumpManager::startDiscovery() {
     std::string version;
     if (!r.ok() || !parseVersion(r, version)) {
       bridgeResponding_ = false;
-      errors_.raiseError(ErrorCode::BridgeUnresponsive, 0, "Bridge pump did not answer 'version'");
+      errors_.raiseError(ErrorCode::BridgeUnresponsive, 0, "Bridge did not answer 'version'");
       for (auto& p : pumps_) {
         p.present = false;
       }
@@ -128,20 +128,32 @@ void PumpManager::startDiscovery() {
       int id = 0;
       if (!g.ok() || !parseId(g, id)) {
         bridgeResponding_ = false;
-        errors_.raiseError(ErrorCode::BridgeUnresponsive, 0, "Bridge pump did not answer 'gid'");
+        errors_.raiseError(ErrorCode::BridgeUnresponsive, 0, "Bridge did not answer 'gid'");
         discoveryDone();
         return;
       }
       bridgeResponding_ = true;
       errors_.clearError(ErrorCode::BridgeUnresponsive, 0);
       engine_.setBridgeId(id);
-      LOG_I("PUMP", "Bridge pump is ID %d, firmware %s", id, version.c_str());
+      if (id == kBridgeBoardId) {
+        LOG_I("PUMP", "Dedicated bridge board, firmware %s", version.c_str());
+      } else {
+        LOG_I("PUMP", "Bridge is pump ID %d, firmware %s", id, version.c_str());
+      }
+      // A pump's own version is checked below; a bridge board isn't in the pump
+      // list, and if it's too old (a different bus speed) no pump would answer.
+      if (compareVersions(version, kMinPumpFirmware) < 0) {
+        errors_.raiseError(ErrorCode::PumpFw, kBridgeBoardId,
+                           "Bridge firmware " + version + " is older than the required " + kMinPumpFirmware);
+      } else {
+        errors_.clearError(ErrorCode::PumpFw, kBridgeBoardId);
+      }
       bool inList = false;
       for (auto& p : pumps_) {
         p.isBridge = p.pumpId == id;
         inList |= p.isBridge;
       }
-      if (!inList) {
+      if (!inList && id != kBridgeBoardId) {
         LOG_W("PUMP", "Bridge pump ID %d is not in the pump list; it is used as a relay only", id);
       }
       for (const auto& p : pumps_) {

@@ -18,7 +18,7 @@ class TransactionEngine {
  public:
   using Callback = std::function<void(const TxnResult&)>;
 
-  // Address used before the bridge pump's own ID is known (discovery).
+  // Address for the board on USB itself, whatever its ID (discovery, E-Stop).
   static constexpr int kDirect = 0;
 
   static constexpr uint32_t kDirectTimeoutMs = 500;
@@ -32,7 +32,7 @@ class TransactionEngine {
 
   TransactionEngine(IPumpTransport& transport, const IClock& clock);
 
-  // The bridge pump's ID (from `gid`); requests to it are sent directly.
+  // The USB board's ID (from `gid`; 0 for a bridge board). Requests to it are direct.
   void setBridgeId(int id) { bridgeId_ = id; }
   int bridgeId() const { return bridgeId_; }
 

@@ -17,6 +17,7 @@ Requirement keywords: **shall** means mandatory, **may** means optional. Every r
 | 1 | Initial spec (`SPEC.md`). |
 | 2 | Restructured. Added pump protocol details, pump firmware v0.3.0 changes, config schema, state model, WebSocket protocol, error catalog and acceptance tests. |
 | 3 | All v2 recommendations and assumptions approved. PF-9, PF-10 and the AP captive DNS are now required. Added a per-pump `autoPrimeSec` config value, plus **Prime All** and **Purge All** (§9.6.2). |
+| 3.5 | **Dedicated bridge board at ID 0** instead of a dispensing pump as the bridge (D-16). Pump firmware 0.7.0: `sid 0` allowed over USB, and motion refused at ID 0 (PF-14). The controller checks the bridge's firmware version. A pump can still act as the bridge on the bench. |
 | 3.4 | Pump firmware 0.6.0: RS485 at 50 kbaud, and firmware update over USB or the bus (PF-13). The controller now requires 0.6.0; its update support is not built yet. |
 | 3.3 | **One pump runs at a time** (D-15, power supply). Pump firmware 0.5.0: RS485 at 9600 baud, 3 s bridge timeout, bus resync, smoother fade (PF-12). Controller: 3 s direct timeout for `tare`/`cal`, 3.5 s bridge timeout; the raw console refuses motion commands. |
 | 3.2 | Target board changed to the YD-ESP32-S3 (N16R8). Same button and LED GPIOs; debug log now on the board's CH343 "COM" USB port; 16 MB partition table (§3, §4.1, §4.5). |
@@ -31,7 +32,7 @@ Requirement keywords: **shall** means mandatory, **may** means optional. Every r
 3. [Hardware](#3-hardware)
 4. [Software Architecture](#4-software-architecture)
 5. [Pump Communication](#5-pump-communication)
-6. [Required DrinkBotPump Firmware Changes (v0.3.0 – v0.6.0)](#6-required-drinkbotpump-firmware-changes-v030--v060)
+6. [Required DrinkBotPump Firmware Changes (v0.3.0 – v0.7.0)](#6-required-drinkbotpump-firmware-changes-v030--v070)
 7. [Configuration](#7-configuration)
 8. [System State Model](#8-system-state-model)
 9. [System Behaviors](#9-system-behaviors)
@@ -58,13 +59,13 @@ There are no open items.
 | # | Decision |
 |---|---|
 | D-1 | **Pin map:** the ESP32-S3 GPIO numbers in §3.2 are the wiring truth. They are the GPIOs behind the original XIAO D-labels (button 7 on GPIO 8, NeoPixel data on GPIO 9; v1 had these swapped) and are kept unchanged on the YD-ESP32-S3. |
-| D-2 | **USB power:** the bridge pump is **self-powered**. The USB link carries data only (§3.1). |
+| D-2 | **USB power:** the bridge board is **self-powered**. The USB link carries data only (§3.1). |
 | D-3 | **Pump idle LEDs:** **off** when the level is OK. Only low, empty, dispense and prime/purge states light them (§11). |
 | D-4 | **Clearing latched errors without a browser:** hold the `estop` button for **3 s** (§10.1). |
 | D-5 | **Pump firmware:** may be changed. v0.6.0 is required (§6, PF-11 to PF-13). |
 | D-6 | **Volume to pump time:** the controller converts each pour to a run time (`ml × msPerMl`) and sends `dispense <ms>` (§9.5). The pump stores no flow rate (PF-11). *(Rev 3.1; was `smilli` then `dispense <ml>`.)* |
 | D-7 | **Scale tare:** each scale is tared with its empty container on it, so weight = liquid only. |
-| D-8 | **Bridge pump:** it dispenses too and has its own ID, so it is addressed directly over USB. |
+| D-8 | **Bridge:** superseded by D-16. On a bench without a bridge board, a pump with a non-zero ID can still be the bridge; it dispenses too and is addressed directly over USB. |
 | D-9 | **Toolchain:** PlatformIO + Arduino-ESP32 core (§4.1). |
 | D-10 | **Missing pump at boot:** degraded error state (§17). |
 | D-11 | **Pour check:** compare against the weight change and log a warning only (§9.5). |
@@ -72,6 +73,7 @@ There are no open items.
 | D-13 | **All v2 recommendations approved:** pump firmware safety cap (PF-9), `sid` range check (PF-10), and the captive DNS in AP mode (§9.2) are required. |
 | D-14 | **Auto prime:** each pump has an `autoPrimeSec` config value. **Prime All** primes each pump in turn for its `autoPrimeSec`. **Purge All** purges each pump in turn for `1.5 × autoPrimeSec` (§9.6.2). |
 | D-15 | **One pump at a time:** the pump power supply is sized for a single running pump, so **no two pumps may ever run at the same time**. Pours, Prime All / Purge All and manual prime/purge are sequential; a new run starts only after the previous pump is confirmed stopped (§9.5, §9.6). The raw maintenance console refuses `dispense`/`prime`/`purge`/`bridge` (§14). Bench tests must follow the same rule. *(Rev 3.3.)* |
+| D-16 | **Dedicated bridge board:** in the final system the RS485 bridge is a dedicated pump board, not a dispensing pump. **ID 0** identifies it as a bridge and not a pump, so it isn't in the pump list, runs no motor, and can't be addressed on the bus. A pump with no ID yet also has ID 0, so it behaves the same way until it gets one. *(Rev 3.5.)* |
 
 ### 1.2 Approved assumptions
 
@@ -87,7 +89,7 @@ There are no open items.
 | A-8 | A button press gives a green flash on its LED for 250 ms, then the LED returns to its role state. Actions fire on press (falling edge), not release. |
 | A-9 | E-Stop aborts the current operation and stops all pumps. It does **not** latch, so the system returns to Ready (or Error, if a fault exists). |
 | A-10 | In AP fallback mode the controller does not keep retrying station mode. A reboot retries. |
-| A-11 | Max 16 pumps. Pump IDs 1–254 are valid; 0 is the factory default and invalid; 255 is broadcast. |
+| A-11 | Max 16 pumps, plus the bridge board. Pump IDs 1–254 are valid. 0 is the bridge board, and also the factory default until a pump is given an ID. 255 is broadcast. |
 | A-12 | Wi-Fi passwords are returned to the web UI in plain text (v1: "no security"). The UI masks them by default. |
 | A-13 | Up to 4 simultaneous WebSocket clients. |
 | A-14 | Recipes are referenced by a stable `id` (so renaming doesn't break button bindings). Ingredients match pump liquids by **case-insensitive name**. |
@@ -105,18 +107,18 @@ The DrinkBotController is a YD-ESP32-S3 board that dispenses mixed drinks. It do
                                                              |  UART0 debug log ("COM" port)
                                                              | "USB" port (host mode, CDC-ACM)
                                                              v
-                                                   DrinkBotPump #A  (the "bridge pump")
-                                                   - dispenses its own liquid (direct)
+                                                   Bridge board (pump PCB, ID 0)
+                                                   - not a pump: runs no motor
                                                    - relays to bus with `bridge <id> <cmd>`
                                                              | RS485 shared bus, 50 kbaud
                          +-------------------+---------------+---------------+
                          v                   v                               v
-                  DrinkBotPump #B     DrinkBotPump #C        ...      DrinkBotPump #N
+                  DrinkBotPump #1     DrinkBotPump #2        ...      DrinkBotPump #N
 ```
 
 ### 2.1 Key facts carried from the pump firmware
 
-- The bridge pump is a normal dispensing pump with its own ID. The controller learns that ID at boot with a direct `gid` and talks to it **directly** over USB. Every other pump is reached through `bridge`.
+- The bridge is a dedicated pump board with **ID 0**, which identifies it as a bridge and not a pump (D-16). The controller learns this at boot with a direct `gid`. It talks to the board **directly** over USB, and every pump is reached through `bridge`.
 - Each pump drives 20 NeoPixels, reads an HX711 load cell, and runs a reversible pump on a timer.
 - The pump has no completion event for a pour, so the controller has to track pour time itself. v0.3.0 adds `status` to confirm it (§6).
 
@@ -128,10 +130,10 @@ The DrinkBotController is a YD-ESP32-S3 board that dispenses mixed drinks. It do
 
 - VCC-GND Studio **YD-ESP32-S3**, ESP32-S3-WROOM-1 **N16R8**: dual-core 240 MHz, 16 MB flash, 8 MB octal PSRAM. (An N8R2 variant would need the board settings in §4.1 changed.)
 - The board has two USB-C ports:
-  - **"USB"** (native USB, GPIO 19/20) is set to **USB host** mode for the bridge pump, so it **cannot** carry the serial console or normal USB flashing at runtime.
+  - **"USB"** (native USB, GPIO 19/20) is set to **USB host** mode for the bridge board, so it **cannot** carry the serial console or normal USB flashing at runtime.
   - **"COM"** (CH343 USB-UART on UART0, GPIO 43/44) carries the debug log and serial flashing (§4.5).
 - **Power (D-2):**
-  - The bridge pump has its own supply, so the USB link carries data only. The controller is powered from the "COM" port, or 5 V on its 5V pin, or 3.3 V on its 3V3 pin.
+  - The bridge board has its own supply, so the USB link carries data only. The controller is powered from the "COM" port, or 5 V on its 5V pin, or 3.3 V on its 3V3 pin.
   - The RP2040 USB stack (TinyUSB) forces VBUS-detect, so it enumerates without VBUS.
   - **Hardware caution:** the YD-ESP32-S3 has solder jumpers that tie the "USB" port's VBUS to the board's 5 V rail (the "USB-OTG" pad; check the silkscreen on your revision). Leave it **open** so the controller and the self-powered pump don't drive VBUS against each other, unless the pump side's VBUS is input-only. Alternatively, use a common supply for both.
   - Both boards must share ground (USB GND).
@@ -152,7 +154,7 @@ The DrinkBotController is a YD-ESP32-S3 board that dispenses mixed drinks. It do
 | GPIO 43 | D6  | Debug UART TX (log output, 115200 8N1); on-board CH343 → "COM" port | UART0 TX |
 | GPIO 44 | D7  | Debug UART RX (unused / reserved for console); on-board CH343 → "COM" port | UART0 RX |
 | GPIO 3  | D2  | Unused (strapping pin, leave unconnected) | — |
-| GPIO 19/20 | USB-C | USB host to bridge pump ("USB" port) | USB OTG |
+| GPIO 19/20 | USB-C | USB host to bridge board ("USB" port) | USB OTG |
 
 ### 3.3 Buttons
 
@@ -247,7 +249,7 @@ The DrinkBotController is a YD-ESP32-S3 board that dispenses mixed drinks. It do
 - RX: accumulate bytes and split on `\n`, stripping `\r`. Max line 256 bytes; longer lines are discarded with a warning.
 - Lines that don't start with `R,`, `P,` or `$[` (e.g. pump debug logs) are **ignored**, logged at VERBOSE.
 
-### 5.3 Direct transaction (bridge pump)
+### 5.3 Direct transaction (the board on USB)
 
 ```
 TX:  weight\n
@@ -257,7 +259,7 @@ RX:  R,OK\n                     (terminal: R,OK | R,ERR | R,INVLD)
 
 The transaction completes on the first `R,` line. Timeout: `DIRECT_TIMEOUT_MS` (500), or `SLOW_DIRECT_TIMEOUT_MS` (3000) for `tare` and `cal`, which block the pump for ~1.8 s while it averages 20 HX711 samples at 10/s.
 
-### 5.4 Bridged transaction (all other pumps), pump FW ≥ 0.3.0
+### 5.4 Bridged transaction (all pumps), pump FW ≥ 0.3.0
 
 ```
 TX:  bridge 3 weight\n
@@ -272,7 +274,7 @@ RX:  R,TIMEOUT\n                   (bridge gave up after kBridgeTimeoutMs = 3000
 - CRC algorithm: CRC-32/ISO-HDLC (reflected, poly `0xEDB88320`, init `0xFFFFFFFF`, xorout `0xFFFFFFFF`), formatted as 8 uppercase hex digits.
   - Request CRC covers `*[<id>|<cmd>|`.
   - Response CRC covers `$[<payload>|`.
-  - The bridge pump builds request packets; the controller only verifies responses.
+  - The bridge builds request packets; the controller only verifies responses.
 - Payloads cannot contain `|`, `]` or newline.
 
 > **v0.2.0 compatibility note:** in 0.2.0 the bridge first writes a local `R,OK` right after sending. It then forwards **only the first** response packet; for `weight` that is `P,WEIGHT` without the `R,OK`. Nothing is sent on timeout. If 0.2.0 support is ever needed, the controller must treat the first `$[` line as the whole response. It must also tell the local `R,OK` apart from the bridged result, and rely only on its own timeout. 0.3.0 removes these quirks (§6).
@@ -292,7 +294,7 @@ RX:  R,TIMEOUT\n                   (bridge gave up after kBridgeTimeoutMs = 3000
 | Command | Use |
 |---|---|
 | `version` | Discovery; check the minimum version (≥ 0.6.0). |
-| `gid` | Learn the bridge pump's ID (direct only). |
+| `gid` | Learn the ID of the board on USB (direct only). 0 is a bridge board (D-16). |
 | `weight` | Level checks, verification, background polling. |
 | `dispense <ms> [ledMode]` | Pour: run forward for `<ms>` (= `ml × msPerMl`, 1–120000). |
 | `prime <ms>` / `purge <ms>` | Prime / purge. |
@@ -303,7 +305,7 @@ RX:  R,TIMEOUT\n                   (bridge gave up after kBridgeTimeoutMs = 3000
 
 ---
 
-## 6. Required DrinkBotPump Firmware Changes (v0.3.0 – v0.6.0)
+## 6. Required DrinkBotPump Firmware Changes (v0.3.0 – v0.7.0)
 
 Gaps found in pump firmware 0.2.0 that this design depends on:
 
@@ -314,14 +316,15 @@ Gaps found in pump firmware 0.2.0 that this design depends on:
 | PF-3 | **Fix `dispense <ml>`**: parse `ml` as a float (`atof`) and compute duration in `uint32_t`. Reject `ml ≤ 0` or `ml > 1000` with `R,ERR`. | 0.2.0 stores `ml` in `uint8_t`, so `dispense 300` silently pours 44 ml and fractions are truncated. |
 | PF-4 | **Busy rejection**: `dispense`, `prime` and `purge` reply `R,ERR` if the pump is already running. | 0.2.0 silently restarts the timer. |
 | PF-5 | **Bridge forwarding**: send no local `R,OK` after transmitting. Forward **every** `$[...]` response line until one whose payload starts with `R,`. On timeout, write `R,TIMEOUT\n`. | 0.2.0 drops the second response packet (the `R,OK` after `P,...`) and reports nothing on timeout. |
-| PF-6 | **Broadcast address 255**: every pump runs the command and **does not reply**. If `bridge 255 <cmd>` is sent, the bridge pump also runs it locally. Allowed only for `stop` and LED commands. | Gives E-Stop one fast transmission to all pumps. |
+| PF-6 | **Broadcast address 255**: every pump runs the command and **does not reply**. If `bridge 255 <cmd>` is sent, the bridge also runs it locally. Allowed only for `stop` and LED commands. | Gives E-Stop one fast transmission to all pumps. |
 | PF-7 | **Version** `0.3.0`. | Superseded by PF-11: the controller now requires `0.4.0`. |
 | PF-8 | Production builds keep the USB `Serial` free of log output (Debug Port = Disabled). | Keeps the line protocol clean (the controller ignores stray lines anyway). |
 | PF-9 | **Hardware safety cap**: any motion lasts at most 120 s. | Limits a runaway if the controller crashes mid-prime. |
-| PF-10 | **`sid` range check**: reject 0 and 255 with `R,ERR`. | Reserved values (A-11). |
+| PF-10 | **`sid` range check**: reject 255 and invalid values with `R,ERR`, and 0 unless sent over USB (PF-14). | Reserved values (A-11). |
 | PF-11 *(0.4.0)* | **`dispense <ms> [ledMode]`** takes a run time in ms (1–120000, PF-9) instead of a volume. `smilli`, `gmilli` and the stored ms/ml are removed; the other EEPROM fields keep their layout. Version `0.4.0`. Supersedes PF-3's ml parsing. | The controller owns the calibration (`msPerMl` in config), so the pump needs no flow-rate state. An older pump would read the run time as millilitres, so it must be refused. |
 | PF-12 *(0.5.0)* | **RS485 at 9600 baud** (was 115200); **bridge timeout 3 s** (was 2 s); the bus receiver **resyncs** on `*`/`$`; the LED fade is fixed (no black/bright frame at phase boundaries, gamma 2.2) and the loop no longer blocks waiting for the HX711. Version `0.5.0`. The baud rate is superseded by PF-13. | Bench tests (2026-11-05) found ~0.4% packet corruption with two motors running and 0.013% with one at 115200 (bit flips from motor noise; CRC caught all). A bridged `tare` took 1.8 s, too close to 2 s. A packet following power-up noise was lost. All pumps on one bus must run the same baud rate. |
 | PF-13 *(0.6.0)* | **RS485 at 50 kbaud** (9600 was slower than needed; a non-standard rate is fine because only pumps share the bus). **Firmware update** over USB or the bus: `fwbegin`, `fwdata`, `fwend`, `fwapply`, `fwabort`, `fwstat`. Flash layout gains a 512 KB file system, so each pump is flashed once over USB. Version `0.6.0`, which the controller requires. | All pumps on a bus must match. Pump-side checks (MD5, image tag, first 12 KB identical to its own flash) refuse wrong images and keep the OTA loader intact. Every later version must keep this baud rate and these commands, or it can't be updated over the bus. See `Software/DrinkBotPump/README.md`. |
+| PF-14 *(0.7.0)* | **ID 0 is a bridge board** (D-16). `sid 0` is accepted over USB only; over the bus it returns `R,ERR`, because it would leave a pump nothing can address. `dispense`, `prime` and `purge` return `R,ERR` at ID 0. Version `0.7.0`. | A bridge board must be able to return to ID 0, and must not run a motor. The bus protocol is unchanged, so 0.6.0 and 0.7.0 boards work together and the controller still requires only 0.6.0. |
 
 ---
 
@@ -496,12 +499,12 @@ any --USB lost--> ERROR (E_USB_LOST)
 
 ### 9.3 Pump discovery & rediscovery
 
-1. Direct `version`. If it fails, raise `E_BRIDGE_UNRESPONSIVE` (blocking). Direct `gid` returns `bridgeId`.
-2. For each configured pump: if `pumpId == bridgeId`, use the direct path; otherwise use bridged. Send `version`.
+1. Direct `version`. If it fails, raise `E_BRIDGE_UNRESPONSIVE` (blocking). Direct `gid` returns `bridgeId`. If the bridge's version is below the minimum, raise `E_PUMP_FW` with no pump ID (degraded); no pump would answer at a different bus speed anyway.
+2. For each configured pump, send `version` through the bridge. (`bridgeId` 0 is a bridge board, so every pump is bridged. On a bench where a pump is the bridge, that pump uses the direct path.)
    - No reply: mark the pump `present=false` and raise `E_PUMP_MISSING(pumpId)` (degraded).
    - Version < 0.6.0: raise `E_PUMP_FW(pumpId)` (degraded; that pump can't dispense).
 3. Read the initial `weight` of every present pump.
-4. If `bridgeId` isn't in the configured pump list, log WARNING. The bridge pump still works as a relay.
+4. A non-zero `bridgeId` that isn't in the configured pump list logs a WARNING; that pump still works as a relay.
 5. Send `ledtime 0` before setting idle LEDs. This cancels the pump's 5 s boot-animation timer, which would otherwise turn the LEDs off.
 6. Rediscovery is run by the Rescan command, by a `pumps` config save, or by USB re-enumeration. It clears `E_PUMP_MISSING` and `E_PUMP_FW` for pumps that now answer.
 
@@ -605,7 +608,7 @@ broadcast bulkProgress(op, COMPLETE)
 E-Stop comes from a button, the web header button, or the WS `estop` command. It runs **ahead of** everything else in the command queue.
 
 1. Cancel the running sequence or manual operation.
-2. Send `bridge 255 stop` (broadcast, PF-6), then send direct `stop` to the bridge pump.
+2. Send `bridge 255 stop` (broadcast, PF-6), then send direct `stop` to the board on USB.
 3. Send an addressed `stop` to every present pump, with retries (§5.5), and collect any failures.
 4. Log at WARNING `E-STOP activated (source=<button|web>)`. Any pump that didn't acknowledge raises `E_STOP_UNCONFIRMED(pumpId)` (latched; needs Clear Errors).
 5. Restore pump LEDs and return to READY/ERROR [A-9].
@@ -861,13 +864,13 @@ An editable table with columns pump ID, liquid, ms/ml, density g/ml, color picke
 - Shown by a "SIMULATOR" banner in the web header, `hello.simulator=true`, and a boot log line.
 - `SimPumpLink` implements `IPumpLink` and models **8 virtual pumps**.
   - IDs are the configured `pumpId`s. If fewer than 8 are configured, more are added with IDs 1–8, skipping IDs already in use.
-  - The first configured pump is the "bridge".
+  - A bridge board with ID 0 sits ahead of them, as in the final system (D-16).
 - Each virtual pump models:
-  - firmware version `0.6.0-sim`;
+  - firmware version `0.7.0-sim`;
   - a starting weight of 750 g × density;
   - `dispense` / `prime` lowering the weight over time at `1/msPerMl` ml/ms (purge raises it);
   - `status`, the LED state, and `tare`/`cal`/`sid` stubs;
-  - realistic latency: 5 ms direct, 25 ms bridged.
+  - realistic latency: 5 ms direct, 20 ms bridged.
 - **Fault injection** (Maintenance tab, simulator only): mark a pump missing, inject a timeout on the next command, or set a pump's weight.
 - All controller logic above the `IPumpLink` interface is the same in simulator and real modes.
 
@@ -878,9 +881,9 @@ An editable table with columns pump ID, liquid, ms/ml, density g/ml, color picke
 | Code | Severity | Raised when | Cleared when |
 |---|---|---|---|
 | `E_USB_LOST` | Blocking | CDC device detached at runtime | Re-enumeration plus successful discovery |
-| `E_BRIDGE_UNRESPONSIVE` | Blocking | Bridge pump doesn't answer `version` | Rescan succeeds |
+| `E_BRIDGE_UNRESPONSIVE` | Blocking | The bridge doesn't answer `version` | Rescan succeeds |
 | `E_PUMP_MISSING(id)` | Degraded | No answer at discovery, or 3 poll failures | That pump answers |
-| `E_PUMP_FW(id)` | Degraded | Pump version < 0.6.0 | Rescan finds ≥ 0.6.0 |
+| `E_PUMP_FW(id)` | Degraded | Pump or bridge version < 0.6.0 (the bridge has no ID in the error) | Rescan finds ≥ 0.6.0 |
 | `E_CONFIG` | Degraded | `config.json` invalid; using backup/default | Successful config save |
 | `E_DISPENSE_TIMEOUT(id)` | Latched | Pump still running after expected time + 5 s | Clear Errors |
 | `E_PUMP_COMM(id)` | Latched | Transaction failure during a dispense or manual op | Clear Errors |
@@ -940,11 +943,12 @@ Pre-check failures (insufficient liquid, unknown recipe, liquid not loaded) are 
 15. **Purge All:** the same pumps run in reverse for 6 s and 3 s (1.5×).
 16. **Prime/Purge All abort:** E-Stop during the second pump stops it within 500 ms, and later pumps don't run. A dispense requested during the sequence is rejected with `BUSY`.
 17. **Schema migration:** a version 1 config loads with `autoPrimeSec` = `defaults.primeSec` on every pump, and is saved as version 2.
-18. **Real hardware:** a direct `version` to the bridge pump and a bridged `version` to every pump succeed, and bridged CRCs verify.
+18. **Real hardware:** a direct `version` to the bridge board and a bridged `version` to every pump succeed, and bridged CRCs verify.
 19. **Manual prime/purge:** Prime on pump A runs until Stop prime is pressed, and ends by itself after 120 s. Pressing Purge on pump B while A is priming stops A before B starts; at no time do both run. Dispense and Prime All are rejected with `BUSY` while a manual run is active.
 20. **Dispense by time:** a pour of `ml` on a pump with `msPerMl` sends `dispense <round(ml × msPerMl)> 3`; no `smilli` is sent. A pour needing more than 120 s is rejected by the precheck.
 21. **One pump at a time (D-15):** across a dispense, Prime All, Purge All and manual prime/purge switching, a pump's `status` never reports `FWD`/`REV` while another pump does. The raw console rejects `prime 1000` with `INVALID`.
-22. **Bridged scale actions:** `tare` and `cal` succeed both on the bridge pump (direct) and through the bridge, within the 3 s / 3.5 s timeouts.
+22. **Bridged scale actions:** `tare` and `cal` succeed through the bridge, and directly on a pump used as the bridge on the bench, within the 3 s / 3.5 s timeouts.
+23. **Bridge board (D-16):** with ID 0 on USB, no pump shows as the bridge and every pump is reached through `bridge`. `prime 1000` at ID 0 returns `R,ERR`. A bridged `sid 0` returns `R,ERR`. A broadcast `stop` halts a running pump. The pump list doesn't include the board, and changing its ID is rejected.
 
 ---
 
@@ -952,8 +956,8 @@ Pre-check failures (insufficient liquid, unknown recipe, liquid not loaded) are 
 
 | Term | Meaning |
 |---|---|
-| Bridge pump | The DrinkBotPump connected to the controller by USB. It dispenses its own liquid and relays commands to the RS485 bus. |
-| Direct / bridged | A command sent straight to the bridge pump, or wrapped in `bridge <id> …` for a pump on the bus. |
+| Bridge board | A dedicated pump PCB with ID 0, connected to the controller by USB. It relays commands to the RS485 bus and doesn't dispense. |
+| Direct / bridged | A command sent straight to the board on USB, or wrapped in `bridge <id> …` for a pump on the bus. |
 | Parts | A unitless ratio of an ingredient within a recipe. |
 | Level | Remaining liquid in ml: weight ÷ density. The scale is tared with the empty container. |
 | Low / Indicated Empty / Actually Empty | The warning threshold / the red-warning threshold / the unpumpable reserve (A-3). |

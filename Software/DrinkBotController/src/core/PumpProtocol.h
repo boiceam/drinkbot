@@ -88,5 +88,7 @@ constexpr const char* kMinPumpFirmware = "0.6.0";
 // Longest single run the pump firmware accepts (kMaxMotionMs, PF-3)
 constexpr uint32_t kMaxPumpRunMs = 120000;
 constexpr int kBroadcastId = 255;
+// `gid` from the board on USB: a dedicated bridge board, which isn't a pump
+constexpr int kBridgeBoardId = 0;
 
 }  // namespace drinkbot

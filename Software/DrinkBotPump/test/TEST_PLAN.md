@@ -1,4 +1,4 @@
-# DrinkBotPump Firmware 0.6.0 — Hardware Test Plan
+# DrinkBotPump Firmware 0.7.0 — Hardware Test Plan
 
 This plan verifies the pump firmware on real boards before the controller (YD-ESP32-S3) exists. The PC stands in for the controller: it talks to each pump over USB and uses one pump as the RS485 bridge to the other.
 
@@ -16,7 +16,7 @@ Most checks are automatic (`pump_test.py` sends commands and checks replies, CRC
 | Power | Each pump's motor supply connected as in normal use. |
 | Liquid | Optional. Pump intake in a cup of water and outlet over another cup makes direction checks easy. Running dry is fine if your pump tolerates it; runs are short. |
 | Scale | Load cell mounted, with the empty container on it. A known weight (e.g. 100–500 g object weighed on a kitchen scale) for calibration. |
-| Firmware | 0.6.0, built with **Tools → Debug Port = Disabled** and **Flash Size = 2MB (Sketch: 1536KB, FS: 512KB)**. The script refuses to run on other versions. Every pump on a bus must run the same version (0.5.0 moved the bus to 9600 baud). |
+| Firmware | 0.7.0, built with **Tools → Debug Port = Disabled** and **Flash Size = 2MB (Sketch: 1536KB, FS: 512KB)**. The script refuses to run on other versions. Every pump on a bus must run the same version (0.5.0 moved the bus to 9600 baud). |
 
 **Flashing:** in the Arduino IDE open `DrinkBotPump.ino`, board *Raspberry Pi Pico*, Debug Port *Disabled*, Upload. (Claude can also flash from the command line with the IDE's bundled `arduino-cli`.)
 
@@ -38,9 +38,9 @@ For the scale alone, on a single pump with no bus: `python3 Software/DrinkBotPum
 
 | # | Test | Method | Pass criteria |
 |---|---|---|---|
-| T0 | Identify & versions | Auto + you | Both report `P,VER,0.6.0`. A lights green, B lights blue so you can label them. |
+| T0 | Identify & versions | Auto + you | Both report `P,VER,0.7.0`. A lights green, B lights blue so you can label them. |
 | T1 | Clean USB output | Auto | No unsolicited bytes on either USB port while idle (proves Debug Port = Disabled). |
-| T2 | ID assignment | Auto | `sid 0`, `sid 255`, `sid 300` → `R,ERR`. `sid <n>` → `R,OK`, `gid` → `P,ID,<n>`, `scfg` → `R,OK`. A and B get distinct IDs. |
+| T2 | ID assignment | Auto | `sid 255`, `sid 300`, `sid abc` → `R,ERR`. `sid <n>` → `R,OK`, `gid` → `P,ID,<n>`, `scfg` → `R,OK`. A and B get distinct IDs. |
 | T3 | Command parser | Auto | Unknown command → `R,INVLD`; blank line → no reply; `\r\n` endings work; missing argument → `R,INVLD`; a 400-char line doesn't hang the parser. |
 | T4 | Motion limits | Auto | `dispense/prime/purge 0`, `… 120001`, `dispense abc` → `R,ERR`, pump stays `IDLE`. |
 | T5 | Forward run & timing | Auto + you | `dispense 3000` → `R,OK`, `status` = `FWD`, ends at 3000 ms ±100 ms. You confirm the motor ran forward. |
@@ -56,6 +56,9 @@ For the scale alone, on a single pump with no bus: `python3 Software/DrinkBotPum
 | T15 | Bridge B → A | Auto | T11's basic checks with the roles swapped (both RS485 directions work). |
 | T16 | Bus soak | Auto | 300 × `bridge B status` with motors off, with B's motor running and with A's motor running, plus 300 × direct `status`: zero timeouts / CRC errors. Reports average and max latency (input for controller timeouts). |
 | T17 | Persistence | You + auto | Power-cycle B (USB **and** motor supply). Boot animation: red fade for ~5 s then dark; GO LED toggles every 2 s. ID and scale calibration survive. |
+| T18 | ID 0 (bridge board) | Auto | Bridged `sid 0` → `$[R,ERR]`. At ID 0 over USB: motion → `R,ERR`, it still bridges to the other pump, and its broadcast `stop` stops that pump. |
+
+The final system's bridge is a dedicated board at ID 0. A and B here are both pumps, because T5, T6 and the other motor tests need them to be.
 
 ## 4. Quick suite (remaining six pumps)
 
@@ -76,11 +79,15 @@ The report lists every check as PASS / FAIL / SKIP with the actual replies and t
 | 2026-11-05 | 0.6.0 | Bus at 50 kbaud: 0 errors in 16,922 requests with one motor running, about 14 ms per bridged request. Firmware update through the bus: 118 KB in 44 s with no retries (213 s at 9600). |
 | 2026-11-05 | 0.6.0 | New pump with the electrical correction: scale at 377 counts/g, noise 0.12 g idle, 0.34 g motor on, up to 0.48 g LEDs on. Settles within about 2 s. Zero held through two untouched power cycles (under 0.2 g). |
 
+| 2026-11-05 | 0.7.0 | A board at ID 0 as the bridge, with pump 1 on the bus: firmware update through it 118 KB in 44 s with no retries; 2,181 requests with no failures and motors idle; broadcast stop halted a running pump 71/71. Bus errors around motor start: 4 of 75 start replies corrupted (CRC caught all), and 1 of 25 `status` requests sent 50 ms after start got no reply; none at 200 ms. |
+
 **Open scale items, deferred on 2026-11-05:**
 - Readings run about 2% high after calibration (50 g added 51.06 g, 100 g added 101.78–102.3 g). Settling is ruled out. Next: compare placements on the container, then check the objects' true weights.
 - One unexplained dip in a 60 s hold, consistent with a single bad sample about 730 g off. It didn't repeat in 1,195 samples. Possible safeguard: report the median of the last 3 samples.
 - Readings shift up about 0.5 g with LEDs on.
 - Pumps 1 and 2 (and any others without the correction) have no usable scale signal.
+
+**PCB fault behind the scale problem:** the load cell's bias voltage output is connected to the HX711's feedback pin instead of its AVDD pin. The correction is to cut that trace and add a small wire to the AVDD pin. A corrected pump gives 377 counts/g, against about 0.06 before. An uncorrected pump reads near zero raw counts and barely responds to weight. The PCB design needs this fix before any new boards are made.
 
 ## 7. Firmware update tests
 

@@ -11,7 +11,7 @@
 
 namespace drinkbot {
 
-// Simulated bridge pump plus RS485 bus of DrinkBotPump 0.6.0 nodes
+// Simulated bridge pump plus RS485 bus of DrinkBotPump 0.7.0 nodes
 // (SPEC_v3 §16). Speaks the same line protocol as the real firmware,
 // including bridged $[..|crc] replies, R,TIMEOUT and broadcast 255.
 class SimPumpLink : public IPumpTransport {
@@ -44,9 +44,10 @@ class SimPumpLink : public IPumpTransport {
 
   SimPumpLink(const IClock& clock, std::vector<PumpSpec> pumps);
 
-  // IDs from the config's pumps, padded to 8 with IDs 1-8 not already in
-  // use. The first configured pump is the bridge.
-  static std::vector<PumpSpec> specsFromConfig(const Config& config);
+  // IDs from the config's pumps, padded to 8 with IDs 1-8 not already in use.
+  // The final system has a dedicated bridge board (ID 0) ahead of them. Without
+  // it, the first configured pump is the bridge, like the two-pump bench setup.
+  static std::vector<PumpSpec> specsFromConfig(const Config& config, bool bridgeBoard = true);
 
   // IPumpTransport
   bool connected() const override { return true; }
@@ -80,7 +81,7 @@ class SimPumpLink : public IPumpTransport {
   struct Pump {
     PumpSpec spec;
     int id = 0;
-    std::string version = "0.6.0-sim";
+    std::string version = "0.7.0-sim";
     float weightG = 0;
     bool missing = false;
     int dropResponses = 0;

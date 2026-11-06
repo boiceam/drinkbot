@@ -189,8 +189,8 @@ void test_dispense_pours_each_ingredient_in_order() {
   TEST_ASSERT_FLOAT_WITHIN(0.5f, 62.5f * 1.05f, s0 - rig.sim.weight(2));
   TEST_ASSERT_FLOAT_WITHIN(0.5f, 62.5f, l0 - rig.sim.weight(4));
   // Pump firmware 0.4.0: dispense takes the run time (ml x msPerMl 100)
-  TEST_ASSERT_EQUAL(0, rig.countPrefix("smilli") + rig.countPrefix("bridge 2 smilli"));
-  TEST_ASSERT_EQUAL(1, rig.count("dispense 12500 3"));
+  TEST_ASSERT_EQUAL(0, rig.countPrefix("bridge 1 smilli") + rig.countPrefix("bridge 2 smilli"));
+  TEST_ASSERT_EQUAL(1, rig.count("bridge 1 dispense 12500 3"));
   TEST_ASSERT_EQUAL(1, rig.count("bridge 2 dispense 6250 3"));
   TEST_ASSERT_EQUAL(0, rig.app.system().errors().size());
 }
@@ -202,7 +202,7 @@ void test_precheck_insufficient_liquid_pours_nothing() {
   TEST_ASSERT_FALSE(r.ok);
   TEST_ASSERT_EQUAL_STRING("PRECHECK_FAILED", r.code.c_str());
   TEST_ASSERT_TRUE(r.message.find("Triple Sec") != std::string::npos);
-  TEST_ASSERT_EQUAL(0, rig.countPrefix("dispense") + rig.countPrefix("bridge 2 dispense"));
+  TEST_ASSERT_EQUAL(0, rig.countPrefix("bridge 1 dispense") + rig.countPrefix("bridge 2 dispense"));
   TEST_ASSERT_TRUE(rig.app.system().state() == SysState::Ready);
 }
 
@@ -247,12 +247,12 @@ void test_prime_all_runs_auto_prime_times_in_id_order() {
   TEST_ASSERT_TRUE(rig.send(make(Command::Type::PrimeAll)).ok);
   TEST_ASSERT_TRUE(rig.app.system().state() == SysState::Manual);
   rig.runUntilIdle();
-  TEST_ASSERT_EQUAL(1, rig.count("prime 4000"));  // pump 1 is the bridge: direct
+  TEST_ASSERT_EQUAL(1, rig.count("bridge 1 prime 4000"));
   TEST_ASSERT_EQUAL(1, rig.count("bridge 4 prime 2000"));
   TEST_ASSERT_EQUAL(0, rig.countPrefix("bridge 2 prime"));
 
   const auto& r = rig.sim.received();
-  auto p1 = std::find(r.begin(), r.end(), "prime 4000");
+  auto p1 = std::find(r.begin(), r.end(), "bridge 1 prime 4000");
   auto p4 = std::find(r.begin(), r.end(), "bridge 4 prime 2000");
   TEST_ASSERT_TRUE(p1 < p4);
   TEST_ASSERT_TRUE(rig.rec.bulk.back().status == BulkProgress::Status::Complete);
@@ -262,7 +262,7 @@ void test_purge_all_runs_one_and_a_half_times_prime() {
   Rig rig;
   TEST_ASSERT_TRUE(rig.send(make(Command::Type::PurgeAll)).ok);
   rig.runUntilIdle();
-  TEST_ASSERT_EQUAL(1, rig.count("purge 6000"));
+  TEST_ASSERT_EQUAL(1, rig.count("bridge 1 purge 6000"));
   TEST_ASSERT_EQUAL(1, rig.count("bridge 4 purge 3000"));
 }
 
@@ -280,7 +280,7 @@ void test_missing_pump_is_skipped_and_degraded() {
     skipped |= p.status == BulkProgress::Status::Skipped && p.pumpId == 4;
   }
   TEST_ASSERT_TRUE(skipped);
-  TEST_ASSERT_EQUAL(1, rig.count("prime 4000"));
+  TEST_ASSERT_EQUAL(1, rig.count("bridge 1 prime 4000"));
 
   // A recipe that needs the missing pump is blocked; the error is degraded only
   Command d = make(Command::Type::Dispense);
@@ -393,6 +393,11 @@ void test_maintenance_raw_and_set_id() {
   TEST_ASSERT_EQUAL_STRING("INVALID", rig.send(raw).code.c_str());
   TEST_ASSERT_EQUAL(0, rig.countPrefix("bridge 4 prime"));
 
+  Command board = make(Command::Type::PumpSetId);  // the bridge board keeps ID 0
+  board.pumpId = kBridgeBoardId;
+  board.newId = 9;
+  TEST_ASSERT_EQUAL_STRING("INVALID", rig.send(board).code.c_str());
+
   Command id = make(Command::Type::PumpSetId);
   id.pumpId = 4;
   id.newId = 9;
@@ -404,19 +409,19 @@ void test_maintenance_raw_and_set_id() {
   TEST_ASSERT_TRUE(rig.app.pumps().find(9)->present);
 }
 
-// tare / cal block a pump for ~1.8 s; the direct (bridge pump) request used
+// tare / cal block a board for ~1.8 s; the direct request used
 // to time out after 500 ms
 void test_tare_and_cal_wait_for_slow_scale() {
   Rig rig;
   Command tare = make(Command::Type::PumpTare);
-  tare.pumpId = 1;  // bridge pump: direct
+  tare.pumpId = kBridgeBoardId;  // the board on USB: direct
   CommandResult r = rig.send(tare);
   TEST_ASSERT_TRUE_MESSAGE(r.ok, r.message.c_str());
   tare.pumpId = 2;  // bridged
   r = rig.send(tare);
   TEST_ASSERT_TRUE_MESSAGE(r.ok, r.message.c_str());
   Command cal = make(Command::Type::PumpCalibrate);
-  cal.pumpId = 1;
+  cal.pumpId = kBridgeBoardId;
   cal.number = 100;
   r = rig.send(cal);
   TEST_ASSERT_TRUE_MESSAGE(r.ok, r.message.c_str());
@@ -487,7 +492,7 @@ void test_manual_switch_stops_previous_pump_first() {
   TEST_ASSERT_TRUE(rig.sim.reversing(4));
 
   const auto& r = rig.sim.received();
-  auto stop1 = std::find(r.begin(), r.end(), "stop");  // pump 1 is the bridge: direct
+  auto stop1 = std::find(r.begin(), r.end(), "bridge 1 stop");
   auto purge4 = std::find(r.begin(), r.end(), "bridge 4 purge 120000");
   TEST_ASSERT_TRUE(stop1 != r.end() && purge4 != r.end());
   TEST_ASSERT_TRUE(stop1 < purge4);
@@ -535,7 +540,7 @@ void test_dispense_rejects_run_over_pump_limit() {
   CommandResult r = rig.send(d);
   TEST_ASSERT_EQUAL_STRING("PRECHECK_FAILED", r.code.c_str());
   TEST_ASSERT_TRUE(r.message.find("120 s") != std::string::npos);
-  TEST_ASSERT_EQUAL(0, rig.countPrefix("dispense"));
+  TEST_ASSERT_EQUAL(0, rig.countPrefix("bridge 1 dispense"));
 }
 
 int main() {

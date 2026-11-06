@@ -5,6 +5,7 @@
 #include <cstdlib>
 
 #include "core/Crc32.h"
+#include "core/PumpProtocol.h"
 
 namespace drinkbot {
 
@@ -40,7 +41,7 @@ SimPumpLink::SimPumpLink(const IClock& clock, std::vector<PumpSpec> pumps) : clo
   }
 }
 
-std::vector<SimPumpLink::PumpSpec> SimPumpLink::specsFromConfig(const Config& config) {
+std::vector<SimPumpLink::PumpSpec> SimPumpLink::specsFromConfig(const Config& config, bool bridgeBoard) {
   std::vector<PumpSpec> specs;
   for (const auto& pc : config.pumps) {
     specs.push_back({pc.pumpId, pc.densityGPerMl, kNominalMsPerMl});
@@ -50,6 +51,9 @@ std::vector<SimPumpLink::PumpSpec> SimPumpLink::specsFromConfig(const Config& co
     if (!used) {
       specs.push_back({id, 1.0f, 100});
     }
+  }
+  if (bridgeBoard) {
+    specs.insert(specs.begin(), {kBridgeBoardId, 1.0f, kNominalMsPerMl});
   }
   return specs;
 }
@@ -116,7 +120,7 @@ bool SimPumpLink::writeLine(const std::string& line) {
   }
 
   if (tokens[0] != "bridge") {
-    // Direct command to the bridge pump itself
+    // Direct command to the board on USB
     if (bridge->ignoreCommands > 0) {
       bridge->ignoreCommands--;
       return true;
@@ -246,7 +250,7 @@ std::vector<std::string> SimPumpLink::execute(Pump& p, const std::string& comman
   char buf[64];
 
   auto startMotion = [&](bool reverse, uint32_t ms) {
-    if (p.active || ms == 0 || ms > kMaxMotionMs) {
+    if (p.id == kBridgeBoardId || p.active || ms == 0 || ms > kMaxMotionMs) {
       return false;
     }
     p.active = true;

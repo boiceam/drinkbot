@@ -1,6 +1,6 @@
 # DrinkBot Pump Controller
 
-The `DrinkBotPump` firmware operates a networked liquid dispensing node designed for a custom control board based on the Raspberry Pi RP2040. It manages a reversible pump for precise liquid delivery, reads real-time weight feedback via an HX711 load cell, and drives a 20-LED NeoPixel strip for visual status indicators. The system operates either as a standalone device connected to a PC via USB (UART), or as part of a multi-node RS485 shared bus network.
+The `DrinkBotPump` firmware operates a networked liquid dispensing node designed for a custom control board based on the Raspberry Pi RP2040. It manages a reversible pump for precise liquid delivery, reads real-time weight feedback via an HX711 load cell, and drives a 20-LED NeoPixel strip for visual status indicators. The system operates either as a standalone device connected to a PC via USB (UART), or as part of a multi-node RS485 shared bus network. The same firmware also runs on the dedicated bridge board.
 
 ## Hardware & Build Requirements
 
@@ -41,12 +41,23 @@ python3 tools/pump_update.py build/DrinkBotPump.ino.bin --port /dev/cu.usbmodem1
 ```
 
 *   **Timing:** about 45 seconds per pump over the bus at 50 kbaud, a few seconds over USB.
-*   **Procedure:** update one pump at a time with no pump running, and update the bridge pump last.
+*   **Procedure:** update one pump at a time with no pump running, and update the bridge last.
 *   **What the pump checks:** the whole image's MD5; that its first 12 KB (boot2 and the OTA loader) match the pump's own flash; and that it contains a `DBP-IMAGE:<version>` tag. So only uncompressed images built with the same Arduino core and flash layout are accepted. Anything else must be flashed over USB. Updates never rewrite the loader.
 *   **If it's interrupted:** until `fwapply` the current firmware keeps running, and a partial image is simply discarded. A staged image that hasn't been aborted is installed on the next reboot, even without `fwapply`. If power fails during the install, the loader starts it again on the next power-up.
 *   **Recovery:** the RP2040's ROM bootloader can't be overwritten. Hold BOOTSEL while plugging in USB and flash over USB. New firmware that boots but can't talk on the bus needs this too: there's no automatic rollback.
 *   **Compatibility:** every version must keep the bus baud rate and these commands working, or the pumps can't be updated over the bus afterwards.
 *   **Not secured:** any device on the bus can update a pump. The bus is internal to the machine.
+
+## Bridge Board
+
+The final system uses a dedicated pump board as the RS485 bridge, with **ID 0** to identify it as a bridge and not a pump. It runs this same firmware:
+
+*   It relays with `bridge <id> <command>`, and accepts `stop` and the LED commands from broadcasts.
+*   `dispense`, `prime` and `purge` return `R,ERR` at ID 0, and the bus can't address it.
+*   ID 0 is also the factory default, so a pump with no ID yet behaves the same way until it's given one.
+*   To set a board up as the bridge, send `sid 0` then `scfg` over USB, or leave a new board as it is.
+
+On the bench, a pump with a non-zero ID can still act as the bridge.
 
 ## Debugging Setup
 
@@ -97,7 +108,7 @@ A packet addressed to `255` is run by **every** pump on the bus, and no pump rep
 All commands return `R,OK\n` on success, `R,ERR\n` on failure, or `R,INVLD\n` for unrecognized inputs. Data retrieval commands return specific `P,...` prefixes, followed by `R,OK`. Blank lines are ignored, and a trailing `\r` is tolerated.
 
 **Configuration & Scale**
-*   `sid <id>`: Set device ID (address). Must be 1-254 (0 is the factory default and 255 is broadcast); otherwise `R,ERR`. Use `scfg` to persist it.
+*   `sid <id>`: Set device ID (address). Must be 1-254 for a pump, or 0 for a bridge board (USB only, since a pump set to 0 over the bus could no longer be addressed); otherwise `R,ERR`. Use `scfg` to persist it.
 *   `gid`: Get device ID (Returns: `P,ID,<id>`).
 *   `tare`: Tare the scale and save the offset to EEPROM. Tare with the empty liquid container on the scale, so readings are liquid weight only.
 *   `cal <weight>`: Calibrate the scale against a known weight and save to EEPROM.
@@ -129,9 +140,13 @@ Every motion command is rejected with `R,ERR` if the pump is already running, or
 
 **System**
 *   `bridge <id> <command>`: Bridge a standard command to a specific device (or `255` for broadcast) over RS485. See Communication Protocols above.
-*   `version`: Returns firmware version (Returns: `P,VER,0.6.0`).
+*   `version`: Returns firmware version (Returns: `P,VER,0.7.0`).
 
 ## Changelog
+
+**0.7.0**
+*   ID 0 identifies a dedicated bridge board: `sid 0` is accepted over USB, and motion commands are rejected at ID 0.
+*   Bus-compatible with 0.6.0.
 
 **0.6.0**
 *   Firmware update over USB or the RS485 bus: `fwbegin`, `fwdata`, `fwend`, `fwapply`, `fwabort`, `fwstat`, and `tools/pump_update.py`.

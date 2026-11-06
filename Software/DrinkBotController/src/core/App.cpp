@@ -176,7 +176,7 @@ void App::checkUsb() {
   bool connected = transport_.connected();
   if (wasConnected_ && !connected) {
     LOG_E("USB", "Pump link lost");
-    system_.raiseError(ErrorCode::UsbLost, 0, "The USB link to the bridge pump was lost");
+    system_.raiseError(ErrorCode::UsbLost, 0, "The USB link to the bridge was lost");
     dispenser_.abort("USB link lost", false);
     bulk_.abort("USB link lost", false);
     ledTest_.clear();
@@ -516,6 +516,10 @@ void App::runMaintenance(Command& cmd, const std::vector<std::string>& commands)
 void App::handleSetId(Command& cmd) {
   int oldId = cmd.pumpId;
   int newId = cmd.newId;
+  if (oldId == kBridgeBoardId) {
+    reply(cmd, failure(ErrCode::kInvalid, "The bridge board is always ID 0"));
+    return;
+  }
   if (newId < 1 || newId > 254) {
     reply(cmd, failure(ErrCode::kInvalid, "Pump ID must be 1-254"));
     return;
@@ -645,7 +649,7 @@ void App::estop(const std::string& source) {
       [this, bridgeId](const TxnResult& r) {
         if (!r.ok()) {
           system_.raiseError(ErrorCode::StopUnconfirmed, bridgeId > 0 ? bridgeId : 0,
-                             "Bridge pump did not confirm the E-Stop");
+                             "The bridge did not confirm the E-Stop");
         }
       },
       true);

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive hardware test for DrinkBotPump firmware 0.6.0 (see TEST_PLAN.md).
+"""Interactive hardware test for DrinkBotPump firmware 0.7.0 (see TEST_PLAN.md).
 
 Two pumps on USB (A = reference / bridge, B = unit under test), wired to each
 other over RS485. Automatic checks run on their own; the script asks you to
@@ -26,7 +26,7 @@ try:
 except ImportError:
     sys.exit("pyserial is missing: python3 -m pip install pyserial")
 
-EXPECTED_VERSION = "0.6.0"
+EXPECTED_VERSION = "0.7.0"
 BRIDGE_TIMEOUT_S = 3.0
 MAX_MOTION_MS = 120000
 
@@ -348,7 +348,7 @@ def t2_ids(a, b, quick=False):
         p.id = int(m.group(1)) if m else None
         say(f"{p.label} currently has ID {p.id}")
     if not quick:
-        for bad in ("0", "255", "300", "abc"):
+        for bad in ("255", "300", "abc"):
             expect(b, f"sid {bad}", "R,ERR")
         expect(b, "sid", "R,INVLD", "B: `sid` without a value → R,INVLD")
     for p, default in ((a, a.id if a.id and 1 <= a.id <= 254 else 1),
@@ -745,6 +745,33 @@ def t17_persistence(a, b):
     R.check(payloads[-1:] == ["R,OK"] and crc, "A can still bridge to B after reboot", " / ".join(lines))
 
 
+def t18_bridge_board(a, b):
+    heading("T18", "ID 0: bridge board behavior")
+    payloads, _, _, _, lines = bridge(a, b.id, "sid 0")
+    R.check(payloads == ["R,ERR"], "A→B: bridged `sid 0` → $[R,ERR]", " / ".join(lines))
+    expect(b, "sid 0", "R,OK", "B: `sid 0` over USB → R,OK (not saved)")
+    lines, _ = b.cmd("gid")
+    R.check("P,ID,0" in lines, "B: gid → P,ID,0", " / ".join(lines))
+    for c in ("dispense 500", "prime 500", "purge 500"):
+        expect(b, c, "R,ERR", f"B at ID 0: `{c}` → R,ERR")
+    st, _ = status(b)
+    R.check(st == "IDLE", "B stays IDLE at ID 0", str(st))
+    payloads, crc, _, _, lines = bridge(b, a.id, "version")
+    R.check(payloads == [f"P,VER,{EXPECTED_VERSION}", "R,OK"] and crc, "B at ID 0 bridges to A", " / ".join(lines))
+    payloads, _, fin, _, lines = bridge(a, b.id, "version")
+    R.check(fin == "R,TIMEOUT", "The bus can't reach B's old ID while it's at 0", " / ".join(lines))
+    lines, _ = a.cmd("bridge 0 version")
+    R.check(final(lines) == "R,ERR", "A: bridge to ID 0 → R,ERR", " / ".join(lines))
+    expect(a, "prime 5000", "R,OK", "A: motor on")
+    time.sleep(0.5)
+    lines, _ = b.cmd("bridge 255 stop")
+    R.check(lines == ["R,OK"], "B at ID 0: broadcast stop → R,OK", " / ".join(lines))
+    time.sleep(0.15)
+    st, _ = status(a)
+    R.check(st == "IDLE", "The broadcast from ID 0 stopped A", str(st))
+    expect(b, f"sid {b.id}", "R,OK", f"B: back to ID {b.id}")
+
+
 # ---------------------------------------------------------------- single pump
 
 def settled_weight(p, samples=8):
@@ -884,7 +911,7 @@ def main_scale_only(port):
 # ---------------------------------------------------------------- main
 
 FULL = ["T0", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10",
-        "T11", "T12", "T13", "T14", "T15", "T16", "T17"]
+        "T11", "T12", "T13", "T14", "T15", "T16", "T18", "T17"]
 QUICK = ["T0", "T1", "T2", "T4", "T5", "T6", "T9", "T10", "T11", "T12", "T16", "T17"]
 
 
@@ -927,6 +954,7 @@ def main():
         "T12": lambda: t12_bridge_errors(a, b, quick), "T13": lambda: t13_bridged_scale(a, b),
         "T14": lambda: t14_broadcast(a, b), "T15": lambda: t15_reverse_bridge(a, b),
         "T16": lambda: t16_soak(a, b, 100 if quick else 300), "T17": lambda: t17_persistence(a, b),
+        "T18": lambda: t18_bridge_board(a, b),
     }
     aborted = False
     try:
