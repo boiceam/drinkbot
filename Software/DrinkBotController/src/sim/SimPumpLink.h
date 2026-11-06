@@ -7,6 +7,7 @@
 
 #include "core/Clock.h"
 #include "core/Config.h"
+#include "core/PumpImage.h"
 #include "core/PumpTransport.h"
 
 namespace drinkbot {
@@ -21,6 +22,7 @@ class SimPumpLink : public IPumpTransport {
   static constexpr uint32_t kBridgedLatencyMs = 20;  // RS485 at 50 kbaud
   // tare / cal block the pump while it averages 20 HX711 samples at 10/s
   static constexpr uint32_t kScaleActionMs = 1800;
+  static constexpr uint32_t kInstallMs = 4000;  // reboot, copy the image, boot again
   static constexpr uint32_t kBridgeTimeoutMs = 3000;  // since firmware 0.5.0
   static constexpr uint32_t kMaxMotionMs = 120000;
   static constexpr float kStartLevelMl = 750;
@@ -50,7 +52,7 @@ class SimPumpLink : public IPumpTransport {
   static std::vector<PumpSpec> specsFromConfig(const Config& config, bool bridgeBoard = true);
 
   // IPumpTransport
-  bool connected() const override { return true; }
+  bool connected() const override;
   bool writeLine(const std::string& line) override;
   bool readLine(std::string& line) override;
   void tick() override;
@@ -68,6 +70,13 @@ class SimPumpLink : public IPumpTransport {
   void ignoreNextCommand(int id);
   // `status` keeps reporting FWD, as if the pump never stopped, until a `stop`.
   void setStuck(int id, bool stuck);
+  // A firmware install that never comes back, or comes back on the old version
+  enum class InstallFault : uint8_t { None, NeverReturns, KeepsOldVersion };
+  void setInstallFault(int id, InstallFault fault);
+  // The pump refuses images, as if built with another core or flash layout
+  void setRefuseImage(int id, bool refuse);
+  std::string firmwareVersion(int id) const;
+  int installCount(int id) const;
 
   float weight(int id) const;
   bool running(int id) const;
@@ -93,6 +102,19 @@ class SimPumpLink : public IPumpTransport {
     uint32_t durationMs = 0;
     uint32_t lastUpdateMs = 0;
     LedState led;
+    // Firmware update (0 idle, 1 receiving, 2 staged)
+    int fwState = 0;
+    uint32_t fwSize = 0;
+    uint32_t fwReceived = 0;
+    size_t fwLastChunk = 0;
+    std::string fwExpectedMd5;
+    std::string fwImageVersion;
+    PumpImageScanner fwScanner;
+    uint32_t bootUntil = 0;
+    bool booting = false;
+    InstallFault installFault = InstallFault::None;
+    bool refuseImage = false;
+    int installs = 0;
   };
 
   Pump* find(int id);

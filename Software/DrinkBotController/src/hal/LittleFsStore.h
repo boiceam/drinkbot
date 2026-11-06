@@ -8,7 +8,7 @@
 
 namespace drinkbot {
 
-// IFileStore over the LittleFS data partition (holds config only, §4.1).
+// IFileStore over the LittleFS data partition (config, §4.1; the pump firmware image is in LittleFsPumpImage).
 class LittleFsStore : public IFileStore {
  public:
   // Mounts, formatting the partition if it can't be mounted (§9.1 step 3).

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Interactive hardware test for DrinkBotPump firmware 0.7.0 (see TEST_PLAN.md).
+"""Interactive hardware test for DrinkBotPump firmware 0.7.1 (see TEST_PLAN.md).
 
 Two pumps on USB (A = reference / bridge, B = unit under test), wired to each
 other over RS485. Automatic checks run on their own; the script asks you to
@@ -26,7 +26,7 @@ try:
 except ImportError:
     sys.exit("pyserial is missing: python3 -m pip install pyserial")
 
-EXPECTED_VERSION = "0.7.0"
+EXPECTED_VERSION = "0.7.1"
 BRIDGE_TIMEOUT_S = 3.0
 MAX_MOTION_MS = 120000
 

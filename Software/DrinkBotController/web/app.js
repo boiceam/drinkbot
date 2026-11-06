@@ -63,7 +63,7 @@ function fwOld(v) {
 const SEVERITY = {
   E_USB_LOST: 'blocking', E_BRIDGE_UNRESPONSIVE: 'blocking',
   E_PUMP_MISSING: 'degraded', E_PUMP_FW: 'degraded', E_CONFIG: 'degraded',
-  E_DISPENSE_TIMEOUT: 'latched', E_PUMP_COMM: 'latched', E_STOP_UNCONFIRMED: 'latched',
+  E_DISPENSE_TIMEOUT: 'latched', E_PUMP_COMM: 'latched', E_STOP_UNCONFIRMED: 'latched', E_PUMP_UPDATE: 'latched',
 };
 const BULK_GAP_MS = 500;
 
@@ -137,6 +137,7 @@ const handlers = {
   dispenseProgress(m) { onDispenseProgress(m); },
   bulkProgress(m) { onBulkProgress(m); },
   ota(m) { onOta(m); },
+  pumpFw(m) { S.pumpFw = m; renderPumpFw(); },
   ack(m) {
     const p = pending.get(m.reqId);
     if (p) { pending.delete(m.reqId); clearTimeout(p.timer); p.resolve(m.data); }
@@ -158,7 +159,7 @@ function applyOne(e) {
   if (e.tagName === 'LABEL') { e.classList.toggle('disabled', dis); const i = $('input', e); if (i) i.disabled = dis; }
   else e.disabled = dis;
 }
-function applyEnabled() { $$('[data-needs-conn]').forEach(applyOne); }
+function applyEnabled() { $$('[data-needs-conn]').forEach(applyOne); renderPumpFw(); }
 
 function setConnected(on) {
   S.connected = on;
@@ -1179,6 +1180,86 @@ function showImportErrors(errs) {
   $('#sImportMsg').append(el('div', { class: 'errsum' }, el('strong', { text: 'Import rejected (' + errs.length + '):' }),
     el('ul', null, errs.map((e) => el('li', null, el('code', { text: e.path || '(config)' }), ' ', e.message)))));
 }
+
+// Pump firmware: uploading stores a file; only the Update pumps button ever touches a pump
+function boardName(id) { return id === 0 ? 'bridge' : 'pump ' + id; }
+function boardList(ids) { return ids.map(boardName).join(', '); }
+function renderPumpFw() {
+  const m = S.pumpFw;
+  if (!m) return;
+  const u = m.update || {};
+  const info = $('#pfInfo');
+  info.replaceChildren();
+  const row = (k, v) => { info.append(el('dt', { text: k }), el('dd', { text: v })); };
+  row('Stored file', m.image ? m.image.version + ' (' + Math.round(m.image.size / 1024) + ' KB)' : 'none');
+  if (m.bridgeId === 0) row('Bridge', m.bridgeVersion || '—');
+  const targets = m.targets || [];
+  const box = $('#pfTargets');
+  box.replaceChildren();
+  if (!m.image) box.append(el('div', { class: 'muted', text: 'Upload a pump firmware .bin (0.7.1 or newer) to check for updates.' }));
+  else if (!targets.length && !u.active) box.append(el('div', { class: 'st-ok', text: 'All reachable boards have this firmware or newer.' }));
+  if (targets.length && !u.active) {
+    box.append(el('div', { class: 'st-warn', text: 'Update available for: ' + boardList(targets.map((t) => t.pumpId)) }));
+    box.append(el('div', { class: 'muted', text: 'About ' + Math.ceil(targets.length * 0.85) + ' min. They update one at a time, bridge last. No drinks during the update.' }));
+  }
+  if (m.needsUsb && m.needsUsb.length) box.append(el('div', { class: 'st-err', text: 'Too old to update here, flash over USB: ' + boardList(m.needsUsb) }));
+  if (m.missing && m.missing.length) box.append(el('div', { class: 'muted', text: 'Not answering, so left alone: ' + boardList(m.missing) }));
+
+  $('#pfBarWrap').hidden = !u.active;
+  const st = $('#pfStatus');
+  if (u.active) {
+    const pct = u.size ? Math.floor(u.bytes * 100 / u.size) : 0;
+    $('#pfBar').style.width = (u.phase === 'INSTALL' ? 100 : pct) + '%';
+    const name = boardName(u.pumpId);
+    st.className = 'small st-run';
+    st.textContent = name.charAt(0).toUpperCase() + name.slice(1) + ' (' + u.index + ' of ' + u.total + '): ' +
+      (u.phase === 'INSTALL' ? 'installing and restarting…' : 'sending ' + pct + '%');
+  } else if (u.result) {
+    st.className = 'small ' + (u.result === 'COMPLETE' ? 'st-ok' : u.result === 'FAILED' ? 'st-err' : 'st-warn');
+    st.textContent = (u.result === 'COMPLETE' ? '✓ Update complete: ' : u.result === 'FAILED' ? '✗ Update stopped: ' : 'Cancelled: ') + u.message;
+  } else {
+    st.textContent = '';
+  }
+  $('#pfUpdate').hidden = !!u.active;
+  $('#pfCancel').hidden = !u.active;
+  $('#pfDelete').hidden = !m.image || !!u.active;
+  $('#pfUpdate').disabled = !S.connected || !targets.length || isBusy();
+}
+$('#pfUpload').addEventListener('click', () => {
+  const file = $('#pfFile').files[0];
+  const msg = $('#pfUploadMsg');
+  if (!file) { toast('Choose a pump firmware .bin first', 'err'); return; }
+  if (!/\.bin$/i.test(file.name)) { toast('Pump firmware must be a .bin file', 'err'); return; }
+  if (isBusy()) { toast('Upload when the controller is idle', 'err'); return; }
+  const fd = new FormData();
+  fd.append('firmware', file, file.name);
+  const xhr = new XMLHttpRequest();
+  msg.className = 'small muted';
+  msg.textContent = 'Uploading…';
+  xhr.onload = () => {
+    if (xhr.status === 200) { msg.className = 'small st-ok'; msg.textContent = '✓ Stored. Nothing is updated until you press Update pumps.'; $('#pfFile').value = ''; return; }
+    let why = 'upload failed';
+    try { why = JSON.parse(xhr.responseText).message || why; } catch (e) { /* not JSON */ }
+    msg.className = 'small st-err';
+    msg.textContent = '✗ ' + why;
+  };
+  xhr.onerror = () => { msg.className = 'small st-err'; msg.textContent = '✗ Upload failed (connection error).'; };
+  xhr.open('POST', '/api/pump-firmware');
+  xhr.send(fd);
+});
+$('#pfUpdate').addEventListener('click', async () => {
+  const m = S.pumpFw;
+  if (!m || !m.targets || !m.targets.length) return;
+  const body = 'Install firmware ' + m.image.version + ' on ' + boardList(m.targets.map((t) => t.pumpId)) +
+    '. This takes about ' + Math.ceil(m.targets.length * 0.85) + ' min, with no drinks until it finishes. If a board fails, the rest are left alone. Keep the power on.';
+  if (!await confirmDlg('Update pumps?', body, 'Update', true)) return;
+  send('pumpFwUpdate').catch((e) => toast(e.message || 'Update refused', 'err'));
+});
+$('#pfCancel').addEventListener('click', () => { send('pumpFwCancel').catch((e) => toast(e.message || 'Cancel failed', 'err')); });
+$('#pfDelete').addEventListener('click', async () => {
+  if (!await confirmDlg('Delete the stored file?', 'Pumps keep the firmware they have. You can upload a file again later.', 'Delete', true)) return;
+  send('pumpFwDelete').catch((e) => toast(e.message || 'Delete failed', 'err'));
+});
 
 // OTA
 let otaActive = false;

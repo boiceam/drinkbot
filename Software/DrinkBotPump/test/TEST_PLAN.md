@@ -1,4 +1,4 @@
-# DrinkBotPump Firmware 0.7.0 — Hardware Test Plan
+# DrinkBotPump Firmware 0.7.1 — Hardware Test Plan
 
 This plan verifies the pump firmware on real boards before the controller (YD-ESP32-S3) exists. The PC stands in for the controller: it talks to each pump over USB and uses one pump as the RS485 bridge to the other.
 
@@ -16,7 +16,7 @@ Most checks are automatic (`pump_test.py` sends commands and checks replies, CRC
 | Power | Each pump's motor supply connected as in normal use. |
 | Liquid | Optional. Pump intake in a cup of water and outlet over another cup makes direction checks easy. Running dry is fine if your pump tolerates it; runs are short. |
 | Scale | Load cell mounted, with the empty container on it. A known weight (e.g. 100–500 g object weighed on a kitchen scale) for calibration. |
-| Firmware | 0.7.0, built with **Tools → Debug Port = Disabled** and **Flash Size = 2MB (Sketch: 1536KB, FS: 512KB)**. The script refuses to run on other versions. Every pump on a bus must run the same version (0.5.0 moved the bus to 9600 baud). |
+| Firmware | 0.7.1, built with **Tools → Debug Port = Disabled** and **Flash Size = 2MB (Sketch: 1536KB, FS: 512KB)**. The script refuses to run on other versions. Every pump on a bus must run the same version (0.5.0 moved the bus to 9600 baud). |
 
 **Flashing:** in the Arduino IDE open `DrinkBotPump.ino`, board *Raspberry Pi Pico*, Debug Port *Disabled*, Upload. (Claude can also flash from the command line with the IDE's bundled `arduino-cli`.)
 
@@ -38,7 +38,7 @@ For the scale alone, on a single pump with no bus: `python3 Software/DrinkBotPum
 
 | # | Test | Method | Pass criteria |
 |---|---|---|---|
-| T0 | Identify & versions | Auto + you | Both report `P,VER,0.7.0`. A lights green, B lights blue so you can label them. |
+| T0 | Identify & versions | Auto + you | Both report `P,VER,0.7.1`. A lights green, B lights blue so you can label them. |
 | T1 | Clean USB output | Auto | No unsolicited bytes on either USB port while idle (proves Debug Port = Disabled). |
 | T2 | ID assignment | Auto | `sid 255`, `sid 300`, `sid abc` → `R,ERR`. `sid <n>` → `R,OK`, `gid` → `P,ID,<n>`, `scfg` → `R,OK`. A and B get distinct IDs. |
 | T3 | Command parser | Auto | Unknown command → `R,INVLD`; blank line → no reply; `\r\n` endings work; missing argument → `R,INVLD`; a 400-char line doesn't hang the parser. |

@@ -31,6 +31,7 @@ std::string logJson(const LogEntry& entry);
 std::string logHistoryJson(const std::vector<LogEntry>& entries);
 std::string dispenseProgressJson(const DispenseProgress& p);
 std::string bulkProgressJson(const BulkProgress& p);
+std::string pumpFwJson(const App& app);
 std::string otaJson(int percent, const char* status, const std::string& message = "");
 std::string ackJson(const std::string& reqId, const CommandResult& result);
 std::string errorJson(const std::string& reqId, const char* code, const std::string& message,

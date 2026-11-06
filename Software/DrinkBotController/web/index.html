@@ -210,6 +210,24 @@
   <section id="tab-maint" class="tab">
     <h2>Maintenance</h2>
     <div class="grid3">
+      <div class="card" id="pfCard">
+        <h3>Pump firmware</h3>
+        <dl id="pfInfo" class="kv"></dl>
+        <div class="row wrap">
+          <input type="file" id="pfFile" accept=".bin" data-needs-conn>
+          <button class="btn" id="pfUpload" data-needs-conn>Upload</button>
+        </div>
+        <div id="pfUploadMsg" class="small muted"></div>
+        <hr>
+        <div id="pfTargets" class="small"></div>
+        <div class="bar" id="pfBarWrap" hidden><div id="pfBar"></div></div>
+        <div id="pfStatus" class="small muted"></div>
+        <div class="row wrap">
+          <button class="btn warn" id="pfUpdate" data-needs-conn>Update pumps</button>
+          <button class="btn" id="pfCancel" data-needs-conn hidden>Cancel</button>
+          <button class="btn small" id="pfDelete" data-needs-conn>Delete file</button>
+        </div>
+      </div>
       <div class="card">
         <h3>Pump</h3>
         <label class="fld">Pump <select id="mPump" data-needs-conn></select></label>

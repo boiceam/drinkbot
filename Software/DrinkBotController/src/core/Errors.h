@@ -15,6 +15,7 @@ enum class ErrorCode : uint8_t {
   DispenseTimeout,
   PumpComm,
   StopUnconfirmed,
+  PumpUpdate,
 };
 
 enum class ErrorSeverity : uint8_t {
@@ -33,6 +34,7 @@ inline const char* errorCodeName(ErrorCode code) {
     case ErrorCode::DispenseTimeout: return "E_DISPENSE_TIMEOUT";
     case ErrorCode::PumpComm: return "E_PUMP_COMM";
     case ErrorCode::StopUnconfirmed: return "E_STOP_UNCONFIRMED";
+    case ErrorCode::PumpUpdate: return "E_PUMP_UPDATE";
   }
   return "E_UNKNOWN";
 }
@@ -49,6 +51,7 @@ inline ErrorSeverity errorSeverity(ErrorCode code) {
     case ErrorCode::DispenseTimeout:
     case ErrorCode::PumpComm:
     case ErrorCode::StopUnconfirmed:
+    case ErrorCode::PumpUpdate:
       return ErrorSeverity::Latched;
   }
   return ErrorSeverity::Blocking;

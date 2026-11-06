@@ -150,7 +150,10 @@ void test_build_wire_command_limits() {
 
   TEST_ASSERT_FALSE(buildWireCommand(false, 2, "a b c d e f g", out));  // 7 > 6 inside bridge
   TEST_ASSERT_TRUE(buildWireCommand(true, 2, "a b c d e f g", out));
-  TEST_ASSERT_FALSE(buildWireCommand(true, 1, std::string(64, 'a'), out));
+  TEST_ASSERT_FALSE(buildWireCommand(true, 1, std::string(64, 'a'), out));  // first token > 15
+  std::string longData = "fwdata 118200 " + std::string(160, 'A');  // the firmware update chunk
+  TEST_ASSERT_TRUE(buildWireCommand(false, 2, longData, out));
+  TEST_ASSERT_FALSE(buildWireCommand(false, 2, "fwdata 0 " + std::string(200, 'A'), out));
   TEST_ASSERT_FALSE(buildWireCommand(true, 1, "averyveryverylongcommand", out));
   TEST_ASSERT_FALSE(buildWireCommand(true, 1, "bad|cmd", out));
   TEST_ASSERT_FALSE(buildWireCommand(false, 0, "weight", out));

@@ -153,6 +153,55 @@ std::string dispenseProgressJson(const DispenseProgress& p) {
   return serialize(doc);
 }
 
+std::string pumpFwJson(const App& app) {
+  JsonDocument doc;
+  doc["type"] = "pumpFw";
+  const PumpUpdater& updater = app.updater();
+  PumpImageInfo image = updater.store() ? updater.store()->info() : PumpImageInfo();
+  if (image.present) {
+    JsonObject o = doc["image"].to<JsonObject>();
+    o["version"] = image.version;
+    o["size"] = image.size;
+    o["md5"] = image.md5;
+  } else {
+    doc["image"] = nullptr;
+  }
+  doc["bridgeId"] = app.pumps().bridgeId();
+  doc["bridgeVersion"] = app.pumps().bridgeVersion();
+  PumpUpdater::Plan plan = updater.plan();
+  JsonArray targets = doc["targets"].to<JsonArray>();
+  for (const auto& t : plan.targets) {
+    JsonObject o = targets.add<JsonObject>();
+    o["pumpId"] = t.pumpId;
+    o["version"] = t.version;
+    o["bridge"] = t.bridge;
+  }
+  JsonArray needsUsb = doc["needsUsb"].to<JsonArray>();
+  for (int id : plan.needsUsb) {
+    needsUsb.add(id);
+  }
+  JsonArray missing = doc["missing"].to<JsonArray>();
+  for (int id : plan.missing) {
+    missing.add(id);
+  }
+  const PumpUpdater::Status& st = updater.status();
+  JsonObject u = doc["update"].to<JsonObject>();
+  u["active"] = updater.active();
+  u["phase"] = st.phase == PumpUpdater::Phase::Install ? "INSTALL"
+               : st.phase == PumpUpdater::Phase::Transfer ? "TRANSFER"
+                                                          : "IDLE";
+  u["pumpId"] = st.pumpId;
+  u["index"] = st.index;
+  u["total"] = st.total;
+  u["bytes"] = st.bytes;
+  u["size"] = st.size;
+  u["result"] = st.result;
+  u["message"] = st.message;
+  std::string out;
+  serializeJson(doc, out);
+  return out;
+}
+
 std::string bulkProgressJson(const BulkProgress& p) {
   JsonDocument doc;
   doc["type"] = "bulkProgress";
@@ -285,6 +334,12 @@ ClientMessage parseClientMessage(const std::string& text) {
   } else if (type == "pumpStop") {
     c.type = T::PumpStop;
     c.pumpId = pumpId();
+  } else if (type == "pumpFwUpdate") {
+    c.type = T::PumpFwUpdate;
+  } else if (type == "pumpFwCancel") {
+    c.type = T::PumpFwCancel;
+  } else if (type == "pumpFwDelete") {
+    c.type = T::PumpFwDelete;
   } else if (type == "primeAll") {
     c.type = T::PrimeAll;
   } else if (type == "purgeAll") {

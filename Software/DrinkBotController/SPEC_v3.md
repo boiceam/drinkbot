@@ -17,6 +17,7 @@ Requirement keywords: **shall** means mandatory, **may** means optional. Every r
 | 1 | Initial spec (`SPEC.md`). |
 | 2 | Restructured. Added pump protocol details, pump firmware v0.3.0 changes, config schema, state model, WebSocket protocol, error catalog and acceptance tests. |
 | 3 | All v2 recommendations and assumptions approved. PF-9, PF-10 and the AP captive DNS are now required. Added a per-pump `autoPrimeSec` config value, plus **Prime All** and **Purge All** (§9.6.2). |
+| 3.6 | **Pump firmware update from the controller**, only when the Update pumps button is pressed (D-17, §9.10). Pump firmware 0.7.1: the motor starts after its command's reply, and images declare their bus speed (PF-15). Commands up to 200 characters. New error `E_PUMP_UPDATE`. |
 | 3.5 | **Dedicated bridge board at ID 0** instead of a dispensing pump as the bridge (D-16). Pump firmware 0.7.0: `sid 0` allowed over USB, and motion refused at ID 0 (PF-14). The controller checks the bridge's firmware version. A pump can still act as the bridge on the bench. |
 | 3.4 | Pump firmware 0.6.0: RS485 at 50 kbaud, and firmware update over USB or the bus (PF-13). The controller now requires 0.6.0; its update support is not built yet. |
 | 3.3 | **One pump runs at a time** (D-15, power supply). Pump firmware 0.5.0: RS485 at 9600 baud, 3 s bridge timeout, bus resync, smoother fade (PF-12). Controller: 3 s direct timeout for `tare`/`cal`, 3.5 s bridge timeout; the raw console refuses motion commands. |
@@ -32,7 +33,7 @@ Requirement keywords: **shall** means mandatory, **may** means optional. Every r
 3. [Hardware](#3-hardware)
 4. [Software Architecture](#4-software-architecture)
 5. [Pump Communication](#5-pump-communication)
-6. [Required DrinkBotPump Firmware Changes (v0.3.0 – v0.7.0)](#6-required-drinkbotpump-firmware-changes-v030--v070)
+6. [Required DrinkBotPump Firmware Changes (v0.3.0 – v0.7.1)](#6-required-drinkbotpump-firmware-changes-v030--v071)
 7. [Configuration](#7-configuration)
 8. [System State Model](#8-system-state-model)
 9. [System Behaviors](#9-system-behaviors)
@@ -74,6 +75,7 @@ There are no open items.
 | D-14 | **Auto prime:** each pump has an `autoPrimeSec` config value. **Prime All** primes each pump in turn for its `autoPrimeSec`. **Purge All** purges each pump in turn for `1.5 × autoPrimeSec` (§9.6.2). |
 | D-15 | **One pump at a time:** the pump power supply is sized for a single running pump, so **no two pumps may ever run at the same time**. Pours, Prime All / Purge All and manual prime/purge are sequential; a new run starts only after the previous pump is confirmed stopped (§9.5, §9.6). The raw maintenance console refuses `dispense`/`prime`/`purge`/`bridge` (§14). Bench tests must follow the same rule. *(Rev 3.3.)* |
 | D-16 | **Dedicated bridge board:** in the final system the RS485 bridge is a dedicated pump board, not a dispensing pump. **ID 0** identifies it as a bridge and not a pump, so it isn't in the pump list, runs no motor, and can't be addressed on the bus. A pump with no ID yet also has ID 0, so it behaves the same way until it gets one. *(Rev 3.5.)* |
+| D-17 | **Pump firmware updates only on request:** uploading a file stores it and shows what could be updated. Nothing is sent to any board until someone presses **Update pumps** and confirms. An automatic mode was considered and left out: an update blocks drinks for several minutes, and there is no rollback. *(Rev 3.6.)* |
 
 ### 1.2 Approved assumptions
 
@@ -182,7 +184,7 @@ The DrinkBotController is a YD-ESP32-S3 board that dispenses mixed drinks. It do
 | Board | `esp32-s3-devkitc-1` with N16R8 overrides (16 MB QIO flash, `qio_opi` PSRAM), env `yd_esp32s3` (default). The old XIAO target remains as env `xiao` (`seeed_xiao_esp32s3`). |
 | USB-on-boot | `ARDUINO_USB_MODE=0`, `ARDUINO_USB_CDC_ON_BOOT=0` (frees the USB peripheral for host mode) |
 | Partition table | `default_16MB.csv` (app0 / app1 for OTA, 6.25 MB each, plus a 3.4 MB LittleFS data partition). The `xiao` env uses `default_8MB.csv`. |
-| Filesystem | LittleFS. Holds **config only** (§7.1). |
+| Filesystem | LittleFS. Holds the config (§7.1) and one pump firmware image (§9.10). |
 
 ### 4.2 Libraries
 
@@ -245,7 +247,7 @@ The DrinkBotController is a YD-ESP32-S3 board that dispenses mixed drinks. It do
 
 ### 5.2 Line framing (controller side)
 
-- TX: ASCII command + `\n`. Max 63 chars. The bridged inner command is ≤ 63 chars, ≤ 8 space-separated tokens, and the first token is ≤ 15 chars.
+- TX: ASCII command + `\n`. The command, direct or bridged, is ≤ 200 chars (firmware update chunks need it), ≤ 8 space-separated tokens, and the first token is ≤ 15 chars.
 - RX: accumulate bytes and split on `\n`, stripping `\r`. Max line 256 bytes; longer lines are discarded with a warning.
 - Lines that don't start with `R,`, `P,` or `$[` (e.g. pump debug logs) are **ignored**, logged at VERBOSE.
 
@@ -305,7 +307,7 @@ RX:  R,TIMEOUT\n                   (bridge gave up after kBridgeTimeoutMs = 3000
 
 ---
 
-## 6. Required DrinkBotPump Firmware Changes (v0.3.0 – v0.7.0)
+## 6. Required DrinkBotPump Firmware Changes (v0.3.0 – v0.7.1)
 
 Gaps found in pump firmware 0.2.0 that this design depends on:
 
@@ -325,6 +327,7 @@ Gaps found in pump firmware 0.2.0 that this design depends on:
 | PF-12 *(0.5.0)* | **RS485 at 9600 baud** (was 115200); **bridge timeout 3 s** (was 2 s); the bus receiver **resyncs** on `*`/`$`; the LED fade is fixed (no black/bright frame at phase boundaries, gamma 2.2) and the loop no longer blocks waiting for the HX711. Version `0.5.0`. The baud rate is superseded by PF-13. | Bench tests (2026-11-05) found ~0.4% packet corruption with two motors running and 0.013% with one at 115200 (bit flips from motor noise; CRC caught all). A bridged `tare` took 1.8 s, too close to 2 s. A packet following power-up noise was lost. All pumps on one bus must run the same baud rate. |
 | PF-13 *(0.6.0)* | **RS485 at 50 kbaud** (9600 was slower than needed; a non-standard rate is fine because only pumps share the bus). **Firmware update** over USB or the bus: `fwbegin`, `fwdata`, `fwend`, `fwapply`, `fwabort`, `fwstat`. Flash layout gains a 512 KB file system, so each pump is flashed once over USB. Version `0.6.0`, which the controller requires. | All pumps on a bus must match. Pump-side checks (MD5, image tag, first 12 KB identical to its own flash) refuse wrong images and keep the OTA loader intact. Every later version must keep this baud rate and these commands, or it can't be updated over the bus. See `Software/DrinkBotPump/README.md`. |
 | PF-14 *(0.7.0)* | **ID 0 is a bridge board** (D-16). `sid 0` is accepted over USB only; over the bus it returns `R,ERR`, because it would leave a pump nothing can address. `dispense`, `prime` and `purge` return `R,ERR` at ID 0. Version `0.7.0`. | A bridge board must be able to return to ID 0, and must not run a motor. The bus protocol is unchanged, so 0.6.0 and 0.7.0 boards work together and the controller still requires only 0.6.0. |
+| PF-15 *(0.7.1)* | **Reply before motor start:** a motion command's reply is sent, then the motor is energized on the next loop pass, and the run time starts then. `stop` still cuts the motor at once. **`DBP-BUS:<baud>` tag** in the image, which also sets the bus speed. Version `0.7.1`. | Bench tests saw 4 of 75 start replies corrupted, attributed to motor start-up current. The tag lets the controller refuse an image that would strand pumps partway through a bus update. Only 0.7.1 and newer images can be stored on the controller. |
 
 ---
 
@@ -625,6 +628,31 @@ Reached from the web UI with a confirm dialog. Rejected while DISPENSING unless 
 
 ---
 
+### 9.10 Pump firmware update
+
+The controller keeps one pump firmware image and uses it to update boards over USB and the bus, only when asked (D-17). This needs the YD board's 3.4 MB LittleFS partition; an image is about 120 KB.
+
+**Storing an image.** `POST /api/pump-firmware` streams the file to `/pumpfw.tmp`. It replaces `/pumpfw.bin` only after these checks, and it survives reboots and controller updates:
+- Not empty, at most 400 KB, not compressed, not a UF2.
+- Has a `DBP-IMAGE:<version>` tag, with a version at or above the minimum (§5).
+- Has a `DBP-BUS:50000` tag. Another speed would leave pumps out of reach partway through, so that update stays a USB job. Images older than 0.7.1 have no such tag and are refused.
+
+Storing an image never touches a board. The controller can't check everything: a pump itself refuses an image built with a different Arduino core or flash layout (PF-13), at the first chunks.
+
+**Which boards.** A present, configured pump or the bridge whose version is older than the image. Never a downgrade. Boards on firmware below the minimum are listed as needing USB, and pumps not answering are listed and left alone. Boards not in the config are unknown to the controller and aren't updated.
+
+**The update**, started by `pumpFwUpdate`, requires an idle controller and shows as state `MANUAL`, so other operations return `BUSY`:
+1. Boards go one at a time in ascending ID, with **the bridge last**, since no pump can be reached while it reboots.
+2. For each board: `fwbegin <size> <md5>`, then `fwdata <offset> <base64>` with 120 bytes per chunk, retrying a chunk up to 5 times, then `fwend`, `fwapply`.
+3. It polls `version` until the board reports the image's version, for up to 60 s, and resends `fwapply` if the board answers on its old version. The next board starts only after that, so a bad image stops at the first board.
+4. A pump takes about 45 s plus its install at 50 kbaud; the bridge takes seconds over USB. The controller rediscovers all boards at the end.
+
+**The bridge's USB link** drops while it installs. That is expected and raises no error. If the bridge hasn't come back when the wait ends, the update fails and `E_USB_LOST` is raised.
+
+**When it goes wrong.** Any failure stops the update, leaves the remaining boards alone and raises latched `E_PUMP_UPDATE(pumpId)` (no ID for the bridge). A board interrupted during a transfer keeps its old firmware. There is no automatic rollback: a board that doesn't come back needs a USB flash.
+
+**Cancel and E-Stop.** `pumpFwCancel` stops during a transfer (with `fwabort`, so the board keeps its firmware) or, during an install, before the next board. An install can't be interrupted. E-Stop does the same immediately, without waiting for the install, and raises no error.
+
 ## 10. Physical UI: Buttons & Controller LEDs
 
 ### 10.1 Button actions
@@ -718,6 +746,7 @@ The server listens on port 80 with no authentication (per v1). All responses are
 | `GET /api/config` | Download `config.json` (`Content-Disposition: attachment; filename=drinkbot-config.json`) |
 | `POST /api/config` | Upload/import a config (JSON body ≤ 32 KB). Validated, then saved. Returns `200 {ok:true}` or `400 {ok:false, errors:[...]}`. Rejected (409) during dispense. |
 | `GET /api/info` | `{fwVersion, buildDate, uptimeMs, freeHeap, simulator, ip, wifiMode}` |
+| `POST /api/pump-firmware` | Multipart pump firmware `.bin` upload (§9.10). Stores the file only; no board is touched. 409 unless READY/ERROR and idle; 400 with `{ok:false,message}` if the image is refused. |
 | `POST /api/ota` | Multipart firmware `.bin` upload. Rejected (409) unless READY/ERROR and idle. Progress goes out as `ota` WS messages. On success: log, reply, then reboot after 1 s. On failure: abort, stay on the current image. |
 | *(any other)* | In AP mode with captive DNS: redirect to `/`. Otherwise 404. |
 
@@ -737,6 +766,7 @@ OTA validates the image header (ESP32-S3 chip ID) before committing. The bootloa
 |---|---|---|
 | `hello` | `{fwVersion, buildDate, simulator, hostname}` | On connect |
 | `state` | `{system: "READY"\|..., errors:[{code, pumpId?, message, latched}], activeRecipeId, activeVolumeMl, wifi:{mode, ssid, ip, rssi}, leds:[{r,g,b,mode:"solid"\|"blink"\|"fast"\|"off"} ×9]}` | On change (≤ 10/s) |
+| `pumpFw` | `{image:{version,size,md5}\|null, bridgeId, bridgeVersion, targets:[{pumpId,version,bridge}], needsUsb:[id], missing:[id], update:{active,phase:"IDLE"\|"TRANSFER"\|"INSTALL",pumpId,index,total,bytes,size,result:""\|"COMPLETE"\|"FAILED"\|"CANCELLED",message}}` | Sent on connect and on change, at most 2/s. |
 | `pumps` | `{pumps:[{pumpId, liquid, present, fwVersion, isBridge, weightG, levelMl, levelState:"OK"\|"LOW"\|"EMPTY"\|"UNKNOWN", activity:"IDLE"\|"DISPENSING"\|"PRIMING"\|"PURGING", led:{r,g,b,mode:1-4, brightness}}]}` | On change, plus every 3 s |
 | `config` | full config object (§7.2) | On connect and after any successful save |
 | `log` | `{t, level, tag, msg}` | Streaming |
@@ -769,6 +799,9 @@ OTA validates the image header (ESP32-S3 chip ID) before committing. The bootloa
 | `pumpCalibrate` | `{pumpId, grams}` | Maintenance |
 | `pumpSetId` | `{pumpId, newId}` | Sends `sid` then `scfg`. Updates config `pumpId` if the pump is in the list, then rescans. |
 | `pumpLedTest` | `{pumpId}` | |
+| `pumpFwUpdate` | — | Update every outdated board from the stored image (§9.10). `INVALID` if there is no image or nothing to update, `BUSY` unless idle. |
+| `pumpFwCancel` | — | Stops an update at the next safe point. |
+| `pumpFwDelete` | — | Forgets the stored image. `BUSY` unless idle. |
 | `pumpRaw` | `{pumpId, command}` | Maintenance console. Rejected unless idle. `dispense`, `prime`, `purge` and `bridge` are rejected with `INVALID` (D-15: a pump started here would be untracked). The result lines come back in `ack.data.lines`. |
 
 Error `code`s: `BUSY`, `INVALID`, `NOT_FOUND`, `PRECHECK_FAILED`, `PUMP_TIMEOUT`, `PUMP_ERROR`, `CONFIG_INVALID`, `INTERNAL`.
@@ -866,7 +899,7 @@ An editable table with columns pump ID, liquid, ms/ml, density g/ml, color picke
   - IDs are the configured `pumpId`s. If fewer than 8 are configured, more are added with IDs 1–8, skipping IDs already in use.
   - A bridge board with ID 0 sits ahead of them, as in the final system (D-16).
 - Each virtual pump models:
-  - firmware version `0.7.0-sim`;
+  - firmware version `0.7.0-sim`, and the `fw*` update commands with fault injection in the unit tests;
   - a starting weight of 750 g × density;
   - `dispense` / `prime` lowering the weight over time at `1/msPerMl` ml/ms (purge raises it);
   - `status`, the LED state, and `tare`/`cal`/`sid` stubs;
@@ -888,6 +921,7 @@ An editable table with columns pump ID, liquid, ms/ml, density g/ml, color picke
 | `E_DISPENSE_TIMEOUT(id)` | Latched | Pump still running after expected time + 5 s | Clear Errors |
 | `E_PUMP_COMM(id)` | Latched | Transaction failure during a dispense or manual op | Clear Errors |
 | `E_STOP_UNCONFIRMED(id)` | Latched | Pump didn't acknowledge `stop` | Clear Errors |
+| `E_PUMP_UPDATE(id)` | Latched | A pump firmware update stopped on this board (§9.10) | Clear Errors |
 
 **Blocking:** no dispense, prime or purge. **Degraded:** operations that don't involve the affected pump are allowed. **Latched:** dispensing is allowed again only after Clear Errors: from the web UI, or by holding the E-Stop button for 3 s (D-4).
 
@@ -949,6 +983,7 @@ Pre-check failures (insufficient liquid, unknown recipe, liquid not loaded) are 
 21. **One pump at a time (D-15):** across a dispense, Prime All, Purge All and manual prime/purge switching, a pump's `status` never reports `FWD`/`REV` while another pump does. The raw console rejects `prime 1000` with `INVALID`.
 22. **Bridged scale actions:** `tare` and `cal` succeed through the bridge, and directly on a pump used as the bridge on the bench, within the 3 s / 3.5 s timeouts.
 23. **Bridge board (D-16):** with ID 0 on USB, no pump shows as the bridge and every pump is reached through `bridge`. `prime 1000` at ID 0 returns `R,ERR`. A bridged `sid 0` returns `R,ERR`. A broadcast `stop` halts a running pump. The pump list doesn't include the board, and changing its ID is rejected.
+24. **Pump firmware update (D-17):** uploading a valid image sends nothing to any board. Junk, compressed files, a wrong `DBP-BUS` and pre-0.7.1 images are refused. Update pumps, confirmed, updates in ID order with the bridge last and no `E_USB_LOST`, and each board ends on the new version with its ID and calibration kept. A board that doesn't come back stops the rest and raises `E_PUMP_UPDATE`. E-Stop during a transfer leaves the board on its old firmware.
 
 ---
 

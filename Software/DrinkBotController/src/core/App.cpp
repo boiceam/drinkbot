@@ -38,9 +38,14 @@ App::App(IPumpTransport& transport, const IClock& clock, SimPumpLink* simulator)
       engine_(transport, clock),
       pumps_(engine_, clock, system_),
       dispenser_(engine_, pumps_, system_, clock),
-      bulk_(engine_, pumps_, system_, clock) {
+      bulk_(engine_, pumps_, system_, clock),
+      updater_(engine_, pumps_, system_, clock) {
   system_.setChangeHandler([this] { stateDirty_ = true; });
-  pumps_.setChangeHandler([this] { pumpsDirty_ = true; });
+  pumps_.setChangeHandler([this] {
+    pumpsDirty_ = true;
+    pumpFwDirty_ = true;  // versions and presence decide which boards are outdated
+  });
+  updater_.setChangeHandler([this] { pumpFwDirty_ = true; });
   dispenser_.setProgressHandler([this](const DispenseProgress& p) {
     for (auto* l : listeners_) {
       l->onDispenseProgress(p);
@@ -129,6 +134,7 @@ void App::tick() {
   pumps_.tick();
   dispenser_.tick();
   bulk_.tick();
+  updater_.tick();
 
   uint32_t now = clock_.nowMs();
   while (!ledTest_.empty() && timeReached(now, ledTest_.front().atMs)) {
@@ -163,6 +169,13 @@ void App::emitEvents() {
       l->onStateChanged();
     }
   }
+  if (pumpFwDirty_ && now - lastPumpFwEmit_ >= kPumpFwMinIntervalMs) {
+    pumpFwDirty_ = false;
+    lastPumpFwEmit_ = now;
+    for (auto* l : listeners_) {
+      l->onPumpFwChanged();
+    }
+  }
   if ((pumpsDirty_ && now - lastPumpsEmit_ >= kPumpsMinIntervalMs) || now - lastPumpsEmit_ >= kPumpsPeriodicMs) {
     pumpsDirty_ = false;
     lastPumpsEmit_ = now;
@@ -174,14 +187,29 @@ void App::emitEvents() {
 
 void App::checkUsb() {
   bool connected = transport_.connected();
-  if (wasConnected_ && !connected) {
+  bool expected = updater_.expectingUsbLoss();
+  if (wasConnected_ && !connected && expected) {
+    LOG_I("USB", "Pump link down while the bridge installs new firmware");
+    usbLossExpected_ = true;
+    engine_.cancelAll(TxnStatus::LinkError);
+  } else if (!connected && usbLossExpected_ && !expected) {
+    // The update gave up on the bridge and it still hasn't come back
+    usbLossExpected_ = false;
+    LOG_E("USB", "Pump link lost");
+    system_.raiseError(ErrorCode::UsbLost, 0, "The USB link to the bridge was lost");
+  } else if (wasConnected_ && !connected) {
     LOG_E("USB", "Pump link lost");
     system_.raiseError(ErrorCode::UsbLost, 0, "The USB link to the bridge was lost");
     dispenser_.abort("USB link lost", false);
     bulk_.abort("USB link lost", false);
+    updater_.abort("USB link lost");
     ledTest_.clear();
     engine_.cancelAll(TxnStatus::LinkError);
+  } else if (!wasConnected_ && connected && expected) {
+    LOG_I("USB", "Pump link back after the bridge's install");  // the updater rediscovers when it's done
+    usbLossExpected_ = false;
   } else if (!wasConnected_ && connected && started_) {
+    usbLossExpected_ = false;
     LOG_I("USB", "Pump link restored; rediscovering pumps");
     system_.clearError(ErrorCode::UsbLost, 0);
     pumps_.startDiscovery();
@@ -444,8 +472,46 @@ void App::handle(Command& cmd) {
       return;
     }
 
+    case T::PumpFwUpdate:
+    case T::PumpFwCancel:
+    case T::PumpFwDelete:
+    case T::PumpFwChanged:
+      handlePumpFw(cmd);
+      return;
+
     case T::SimFault:
       handleSimFault(cmd);
+      return;
+  }
+}
+
+void App::handlePumpFw(Command& cmd) {
+  using T = Command::Type;
+  pumpFwDirty_ = true;
+  switch (cmd.type) {
+    case T::PumpFwUpdate:
+      // Only ever started by this command, never by itself
+      if (guardIdle(cmd)) {
+        LOG_W("PUMP", "Pump firmware update requested (%s)", cmd.source.c_str());
+        replyOp(cmd, updater_.start());
+      }
+      return;
+    case T::PumpFwCancel:
+      replyOp(cmd, updater_.cancel());
+      return;
+    case T::PumpFwDelete:
+      if (!guardIdle(cmd)) {
+        return;
+      }
+      if (updater_.store() && updater_.store()->remove()) {
+        LOG_I("PUMP", "Stored pump firmware deleted (%s)", cmd.source.c_str());
+        reply(cmd, {});
+      } else {
+        reply(cmd, failure(ErrCode::kInternal, "Couldn't delete the stored firmware"));
+      }
+      return;
+    default:
+      reply(cmd, {});
       return;
   }
 }
@@ -633,6 +699,7 @@ void App::estop(const std::string& source) {
   // Abort first so the sequences ignore the cancellations below
   dispenser_.abort("E-Stop", false);
   bulk_.abort("E-Stop", false);
+  updater_.abort("E-Stop");
   if (!ledTest_.empty()) {
     ledTest_.clear();
     maintenanceBusy_ = false;

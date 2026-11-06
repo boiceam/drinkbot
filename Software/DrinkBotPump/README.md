@@ -16,7 +16,7 @@ The `DrinkBotPump` firmware operates a networked liquid dispensing node designed
 
 Core behaviors are defined at the top of `DrinkBotPump.ino` using `constexpr` constants for easy modification:
 *   `kLedBootAnimationTimeMs` (Default 5000ms) - Duration of the red boot-up visual.
-*   `kCommBusBaudRate` (Default 50000) - Serial baud rate for RS485 data transmission. Every pump on a bus must use the same rate.
+*   `kBusTag` (Default `DBP-BUS:50000`) - Serial baud rate for RS485 data transmission. Every pump on a bus must use the same rate.
 *   `kBridgeTimeoutMs` (Default 3000ms) - Time the pump waits for the final response when acting as a UART-to-RS485 bridge. It must exceed the ~1.8 s that a bridged `tare` or `cal` takes.
 *   `kScaleTaskIntervalMs` / `kScaleReadingsPerMeasurement` - Minimum interval between background weight readings, and readings averaged per pass. The loop never waits for the HX711: it reads only once a sample is ready (10 samples/s).
 *   `kScaleActionWaitTimeMs` / `kScaleCalibrationReadings` - Higher-precision read configurations used strictly when zeroing (tare) or calibrating the scale.
@@ -40,6 +40,7 @@ python3 tools/pump_update.py build/DrinkBotPump.ino.bin --port /dev/cu.usbmodem1
 python3 tools/pump_update.py build/DrinkBotPump.ino.bin --port /dev/cu.usbmodem14101
 ```
 
+*   **From the controller:** upload the `.bin` under Maintenance → Pump firmware, then press **Update pumps**. This is what to use in the finished machine; `tools/pump_update.py` is for the bench.
 *   **Timing:** about 45 seconds per pump over the bus at 50 kbaud, a few seconds over USB.
 *   **Procedure:** update one pump at a time with no pump running, and update the bridge last.
 *   **What the pump checks:** the whole image's MD5; that its first 12 KB (boot2 and the OTA loader) match the pump's own flash; and that it contains a `DBP-IMAGE:<version>` tag. So only uncompressed images built with the same Arduino core and flash layout are accepted. Anything else must be flashed over USB. Updates never rewrite the loader.
@@ -140,9 +141,13 @@ Every motion command is rejected with `R,ERR` if the pump is already running, or
 
 **System**
 *   `bridge <id> <command>`: Bridge a standard command to a specific device (or `255` for broadcast) over RS485. See Communication Protocols above.
-*   `version`: Returns firmware version (Returns: `P,VER,0.7.0`).
+*   `version`: Returns firmware version (Returns: `P,VER,0.7.1`).
 
 ## Changelog
+
+**0.7.1**
+*   A motion command's reply goes out before the motor starts, because motor start-up current can corrupt bus traffic. `stop` still cuts the motor immediately.
+*   The image carries its bus speed in a `DBP-BUS:<baud>` tag, which also sets the speed. The controller refuses an image with a different speed.
 
 **0.7.0**
 *   ID 0 identifies a dedicated bridge board: `sid 0` is accepted over USB, and motion commands are rejected at ID 0.

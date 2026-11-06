@@ -15,6 +15,7 @@
 #include "core/Dispenser.h"
 #include "core/Operations.h"
 #include "core/PumpManager.h"
+#include "core/PumpUpdater.h"
 #include "core/PumpTransport.h"
 #include "core/SystemState.h"
 #include "core/TransactionEngine.h"
@@ -53,6 +54,10 @@ struct Command {
     PumpSetId,      // pumpId, newId
     PumpLedTest,    // pumpId
     PumpRaw,        // pumpId, text = command
+    PumpFwUpdate,   // update every outdated board from the stored image
+    PumpFwCancel,
+    PumpFwDelete,   // forget the stored image
+    PumpFwChanged,  // a new image was stored
     SimFault,       // pumpId, text = missing | present | timeout | overrun | weight, number = grams
   };
 
@@ -75,6 +80,7 @@ class IAppListener {
   virtual void onConfigChanged() {}
   virtual void onDispenseProgress(const DispenseProgress&) {}
   virtual void onBulkProgress(const BulkProgress&) {}
+  virtual void onPumpFwChanged() {}
 };
 
 // Owns all controller logic and runs on one task (SPEC_v3 §4.4). Other
@@ -92,10 +98,12 @@ class App {
   static constexpr uint32_t kPumpsMinIntervalMs = 250;
   static constexpr uint32_t kPumpsPeriodicMs = 3000;
   static constexpr uint32_t kRebootDelayMs = 500;
+  static constexpr uint32_t kPumpFwMinIntervalMs = 500;
 
   App(IPumpTransport& transport, const IClock& clock, SimPumpLink* simulator = nullptr);
 
   void setHooks(Hooks hooks) { hooks_ = std::move(hooks); }
+  void setPumpImageStore(IPumpImageStore* store) { updater_.setStore(store); }
   void addListener(IAppListener* listener) { listeners_.push_back(listener); }
 
   // Loads config JSON (falling back to the factory default and raising
@@ -117,6 +125,7 @@ class App {
   bool simulator() const { return sim_ != nullptr; }
   bool dispensing() const { return dispenser_.active(); }
   BulkPlan bulkPlan(BulkOp op) const { return bulk_.plan(op); }
+  const PumpUpdater& updater() const { return updater_; }
   // Why a recipe can't be poured right now ("" = available).
   std::string recipeUnavailableReason(const Recipe& recipe) const;
 
@@ -132,6 +141,7 @@ class App {
   void handleLedTest(Command& cmd);
   void handleSimFault(Command& cmd);
   void checkUsb();
+  void handlePumpFw(Command& cmd);
   void emitEvents();
 
   IPumpTransport& transport_;
@@ -145,6 +155,10 @@ class App {
   PumpManager pumps_;
   Dispenser dispenser_;
   BulkSequencer bulk_;
+  PumpUpdater updater_;
+  bool pumpFwDirty_ = true;
+  uint32_t lastPumpFwEmit_ = 0;
+  bool usbLossExpected_ = false;  // the bridge is rebooting into new firmware
 
   Config config_;
   std::string configJson_;

@@ -51,9 +51,16 @@ SEVERITY = {
     "E_USB_LOST": "blocking", "E_BRIDGE_UNRESPONSIVE": "blocking",
     "E_PUMP_MISSING": "degraded", "E_PUMP_FW": "degraded", "E_CONFIG": "degraded",
     "E_DISPENSE_TIMEOUT": "latched", "E_PUMP_COMM": "latched", "E_STOP_UNCONFIRMED": "latched",
+    "E_PUMP_UPDATE": "latched",
 }
 
 SPEED = 1.0
+MIN_PUMP_FW = "0.6.0"
+
+
+def version_tuple(version):
+    """'0.7.0-sim' -> (0, 7, 0), the way compareVersions reads it."""
+    return tuple(int(x) for x in re.findall(r"\d+", version.split("-")[0])[:3])
 WEB_DIR = ""
 
 
@@ -368,6 +375,11 @@ class Sim(object):
         self.boot = time.time()
         self.config = default_config()
         self.system = "BOOTING"
+        self.pump_image = None
+        self.bridge_version = "0.7.0-sim"
+        self.pump_fw_cancel = False
+        self.pump_fw_update = {"active": False, "phase": "IDLE", "pumpId": 0, "index": 0, "total": 0,
+                               "bytes": 0, "size": 0, "result": "", "message": ""}
         self.errors = []
         self.web_level = "INFO"
         self.logs = []
@@ -408,6 +420,101 @@ class Sim(object):
             c.send(obj)
             if not c.alive and c in self.clients:
                 self.clients.remove(c)
+
+    # ----- pump firmware (§9.10): uploading stores a file, only the button updates
+    def pump_fw_plan(self):
+        img = self.pump_image
+        plan = {"targets": [], "needsUsb": [], "missing": []}
+        if not img:
+            return plan
+        for pid in sorted(self.pumps):
+            p = self.pumps[pid]
+            if not self.present(pid):
+                plan["missing"].append(pid)
+            elif version_tuple(p["fwVersion"]) >= version_tuple(img["version"]):
+                continue
+            elif version_tuple(p["fwVersion"]) < version_tuple(MIN_PUMP_FW):
+                plan["needsUsb"].append(pid)
+            else:
+                plan["targets"].append({"pumpId": pid, "version": p["fwVersion"], "bridge": False})
+        if version_tuple(self.bridge_version) < version_tuple(img["version"]):
+            plan["targets"].append({"pumpId": 0, "version": self.bridge_version, "bridge": True})
+        return plan
+
+    def pump_fw_msg(self):
+        return dict({"type": "pumpFw", "image": self.pump_image, "bridgeId": 0,
+                     "bridgeVersion": self.bridge_version, "update": self.pump_fw_update}, **self.pump_fw_plan())
+
+    def pump_fw_changed(self, **update):
+        self.pump_fw_update.update(update)
+        self.broadcast(self.pump_fw_msg())
+
+    def store_pump_image(self, data):
+        """Same checks as PumpImageScanner on the controller."""
+        if not data:
+            raise ReqError("INVALID", "The file is empty")
+        if len(data) > 400 * 1024:
+            raise ReqError("INVALID", "The file is larger than a pump can store")
+        if data[:2] == b"\x1f\x8b":
+            raise ReqError("INVALID", "Compressed images aren't accepted; use the plain .bin")
+        if data[:4] == b"UF2\n":
+            raise ReqError("INVALID", "That's a UF2 file; use the .bin from the same build")
+        m = re.search(rb"DBP-IMAGE:([0-9A-Za-z.\-]+)", data)
+        if not m:
+            raise ReqError("INVALID", "Not DrinkBotPump firmware (no DBP-IMAGE tag)")
+        version = m.group(1).decode()
+        if version_tuple(version) < version_tuple(MIN_PUMP_FW):
+            raise ReqError("INVALID", "Firmware %s is older than the required %s" % (version, MIN_PUMP_FW))
+        b = re.search(rb"DBP-BUS:([0-9]+)", data)
+        if not b:
+            raise ReqError("INVALID", "Firmware %s doesn't declare its bus speed (DBP-BUS tag); it needs 0.7.1 or newer" % version)
+        if b.group(1) != b"50000":
+            raise ReqError("INVALID", "Firmware %s uses bus speed %s, not 50000. Pumps would lose contact during "
+                                      "the update, so flash it over USB" % (version, b.group(1).decode()))
+        self.pump_image = {"version": version, "size": len(data), "md5": hashlib.md5(data).hexdigest()}
+        self.log("INFO", "PUMP", "Stored pump firmware %s (%d bytes)" % (version, len(data)))
+        self.pump_fw_changed()
+
+    def run_pump_update(self):
+        img, targets = self.pump_image, self.pump_fw_plan()["targets"]
+        done = "CANCELLED"
+        message = ""
+        try:
+            for i, t in enumerate(targets):
+                pid = t["pumpId"]
+                name = "The bridge" if pid == 0 else "Pump %d" % pid
+                self.log("INFO", "PUMP", "%s: firmware %s -> %s" % (name, t["version"], img["version"]))
+                sent = 0
+                while sent < img["size"]:
+                    if self.abort.is_set() or self.pump_fw_cancel:
+                        message = name + " keeps its current firmware"
+                        return
+                    if pid and not self.present(pid):
+                        done, message = "FAILED", name + " stopped responding during the transfer"
+                        self.log("ERROR", "PUMP", "Pump firmware update stopped: %s" % message)
+                        return
+                    self.sleep(1000)
+                    sent = min(img["size"], sent + 2700)
+                    self.pump_fw_changed(active=True, phase="TRANSFER", pumpId=pid, index=i + 1,
+                                         total=len(targets), bytes=sent, size=img["size"])
+                self.pump_fw_changed(phase="INSTALL")
+                self.log("INFO", "PUMP", "%s: image verified; installing" % name)
+                self.sleep(4000)
+                if pid:
+                    self.pumps[pid]["fwVersion"] = img["version"]
+                    self.pumps_dirty = True
+                else:
+                    self.bridge_version = img["version"]
+                if self.pump_fw_cancel and i + 1 < len(targets):
+                    message = "Stopped before the next board"
+                    return
+            done, message = "COMPLETE", "%d board(s) on firmware %s" % (len(targets), img["version"])
+        except Abort:
+            message = "E-Stop"
+            raise
+        finally:
+            self.log("INFO", "PUMP", "Pump firmware update %s: %s" % (done, message))
+            self.pump_fw_changed(active=False, phase="IDLE", result=done, message=message)
 
     def rebuild_pumps(self):
         old = self.pumps
@@ -566,6 +673,7 @@ class Sim(object):
         c.send(self.state_msg())
         c.send(self.pumps_msg())
         c.send({"type": "config", "config": self.config})
+        c.send(self.pump_fw_msg())
         lvl = LEVELS.index(self.web_level)
         c.send({"type": "logHistory", "lines": [l for l in self.logs if LEVELS.index(l["level"]) <= lvl]})
         self.clients.append(c)
@@ -1049,6 +1157,25 @@ class Sim(object):
                 self.set_idle_led(pid)
                 self.pumps_dirty = True
             threading.Thread(target=ledtest, daemon=True).start()
+        elif t == "pumpFwUpdate":
+            need_idle()
+            if not self.pump_image:
+                raise ReqError("INVALID", "Upload a pump firmware file first")
+            if not self.pump_fw_plan()["targets"]:
+                raise ReqError("INVALID", "Every reachable board already has firmware %s or newer"
+                               % self.pump_image["version"])
+            self.log("WARN", "PUMP", "Pump firmware update requested")
+            self.pump_fw_cancel = False
+            self.pump_fw_changed(active=True, phase="TRANSFER", result="", message="", bytes=0)
+            self.start_op("MANUAL", self.run_pump_update)
+        elif t == "pumpFwCancel":
+            if not self.pump_fw_update["active"]:
+                raise ReqError("INVALID", "No update is running")
+            self.pump_fw_cancel = True
+        elif t == "pumpFwDelete":
+            need_idle()
+            self.pump_image = None
+            self.pump_fw_changed()
         elif t == "pumpRaw":
             need_idle()
             pid = pump_id()
@@ -1170,6 +1297,19 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"ok": True})
         if path == "/api/ota":
             return self.ota(n)
+        if path == "/api/pump-firmware":
+            body = self.rfile.read(n)
+            if SIM.system not in ("READY", "ERROR"):
+                return self.send_json(409, {"ok": False, "message": "The controller is busy; upload when it is idle"})
+            head = body.find(b"\r\n\r\n")
+            tail = body.rfind(b"\r\n--")
+            data = body[head + 4:tail] if head >= 0 and tail > head else body
+            try:
+                SIM.store_pump_image(data)
+            except ReqError as ex:
+                SIM.log("WARN", "PUMP", "Pump firmware upload refused: %s" % ex.message)
+                return self.send_json(400, {"ok": False, "message": ex.message})
+            return self.send_json(200, {"ok": True})
         self.send_json(404, {"ok": False})
 
     def ota(self, n):

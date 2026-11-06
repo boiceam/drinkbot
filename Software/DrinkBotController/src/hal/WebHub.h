@@ -12,6 +12,7 @@
 #include "core/Log.h"
 #include "core/UiController.h"
 #include "core/WsProtocol.h"
+#include "hal/LittleFsPumpImage.h"
 #include "hal/NetManager.h"
 
 namespace drinkbot {
@@ -30,7 +31,7 @@ class WebHub : public IAppListener, public ILogSink {
   static constexpr size_t kMaxMessageBytes = 40 * 1024;
   static constexpr uint32_t kOtaRebootDelayMs = 1000;
 
-  WebHub(App& app, UiController& ui, NetManager& net, const std::string& buildDate);
+  WebHub(App& app, UiController& ui, NetManager& net, LittleFsPumpImage& pumpImage, const std::string& buildDate);
 
   // Starts the server; call once an IP exists.
   void begin();
@@ -44,6 +45,7 @@ class WebHub : public IAppListener, public ILogSink {
   void onConfigChanged() override;
   void onDispenseProgress(const DispenseProgress& p) override;
   void onBulkProgress(const BulkProgress& p) override;
+  void onPumpFwChanged() override;
 
   // ILogSink (any task)
   void write(const LogEntry& entry) override;
@@ -52,6 +54,7 @@ class WebHub : public IAppListener, public ILogSink {
   void routeStatic();
   void routeApi();
   void routeOta();
+  void routePumpFirmware();
   void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client, AwsEventType type, void* arg,
                  uint8_t* data, size_t len);
   void onWsMessage(uint32_t clientId, const std::string& text);
@@ -65,6 +68,7 @@ class WebHub : public IAppListener, public ILogSink {
   App& app_;
   UiController& ui_;
   NetManager& net_;
+  LittleFsPumpImage& pumpImage_;
   std::string buildDate_;
   AsyncWebServer server_{80};
   AsyncWebSocket ws_{"/ws"};
@@ -75,6 +79,7 @@ class WebHub : public IAppListener, public ILogSink {
   std::string stateSnap_;
   std::string pumpsSnap_;
   std::string configSnap_;
+  std::string pumpFwSnap_;
   WifiInfo wifiSnap_;
   uint32_t nextStateCheck_ = 0;
 
@@ -97,6 +102,11 @@ class WebHub : public IAppListener, public ILogSink {
   std::string otaError_;
   int otaLastPercent_ = -1;
   std::atomic<bool> otaRebootPending_{false};
+
+  // Pump firmware upload (AsyncTCP task)
+  bool pumpFwFailed_ = false;
+  bool pumpFwBusy_ = false;
+  std::string pumpFwError_;
   uint32_t otaRebootAt_ = 0;
 };
 

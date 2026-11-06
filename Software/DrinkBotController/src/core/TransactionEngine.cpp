@@ -33,7 +33,7 @@ TransactionEngine::RetryClass TransactionEngine::classify(const std::string& com
   if (cmd == "stop") {
     return RetryClass::Stop;
   }
-  // tare, cal, sid, scfg and raw maintenance commands: report, don't retry
+  // tare, cal, sid, scfg, firmware update and raw maintenance commands: report, don't retry
   return RetryClass::None;
 }
 
@@ -125,7 +125,8 @@ void TransactionEngine::start(std::shared_ptr<Request> req) {
   bool bridgedReply = !direct && req->pumpId != kBroadcastId;
   parser_.begin(bridgedReply);
   std::string cmd = firstToken(req->command);
-  bool slow = cmd == "tare" || cmd == "cal";
+  // Flash work blocks the board: averaging the scale, or an image write
+  bool slow = cmd == "tare" || cmd == "cal" || cmd.rfind("fw", 0) == 0;
   uint32_t timeoutMs = bridgedReply ? kBridgeTimeoutMs : (slow ? kSlowDirectTimeoutMs : kDirectTimeoutMs);
   deadline_ = clock_.nowMs() + timeoutMs;
   current_ = std::move(req);

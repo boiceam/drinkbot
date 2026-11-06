@@ -13,6 +13,7 @@
 #include "core/Log.h"
 #include "core/UiController.h"
 #include "core/UiModel.h"
+#include "hal/LittleFsPumpImage.h"
 #include "hal/LittleFsStore.h"
 #include "hal/NetManager.h"
 #include "hal/PanelHal.h"
@@ -44,6 +45,7 @@ MillisClock clock_;
 UartLogSink uartSink;
 LittleFsStore files;
 ConfigStore configStore(files);
+LittleFsPumpImage pumpImage;
 NetManager net;
 UsbPumpLink usbLink;
 std::unique_ptr<SimPumpLink> simLink;
@@ -81,6 +83,7 @@ void setup() {
   if (!files.begin()) {
     LOG_E("CFG", "LittleFS unavailable; config changes will not be saved");
   }
+  pumpImage.begin();
   std::string configJson;
   ConfigStore::Source source = configStore.load(configJson);
 
@@ -105,9 +108,10 @@ void setup() {
     app.reset(new App(usbLink, clock_));
   }
 
+  app->setPumpImageStore(&pumpImage);
   app->setHooks({[](const std::string& json) { return configStore.save(json); }, [] { ESP.restart(); }});
   ui.reset(new UiController(*app, uiModel));
-  web.reset(new WebHub(*app, *ui, net, std::string(__DATE__) + " " + __TIME__));
+  web.reset(new WebHub(*app, *ui, net, pumpImage, std::string(__DATE__) + " " + __TIME__));
   app->addListener(web.get());
   logger().addSink(web.get(), LogLevel::Info);  // web log level is changeable at runtime
   leds.show(ui->frame());  // status LED white while booting

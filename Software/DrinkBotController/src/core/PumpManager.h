@@ -61,6 +61,7 @@ class PumpManager {
   void startDiscovery();
   bool discovering() const { return discovering_; }
   bool bridgeResponding() const { return bridgeResponding_; }
+  const std::string& bridgeVersion() const { return bridgeVersion_; }
   int bridgeId() const { return engine_.bridgeId(); }
 
   // Background polling only runs while enabled and the link is idle.
@@ -109,6 +110,7 @@ class PumpManager {
 
   bool discovering_ = false;
   bool bridgeResponding_ = false;
+  std::string bridgeVersion_;
   int discoveryPending_ = 0;
   uint32_t discoveryGeneration_ = 0;
 

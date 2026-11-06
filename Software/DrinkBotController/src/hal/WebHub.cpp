@@ -37,8 +37,8 @@ bool looksLikeEsp32S3Image(const uint8_t* data, size_t len, std::string& why) {
 
 }  // namespace
 
-WebHub::WebHub(App& app, UiController& ui, NetManager& net, const std::string& buildDate)
-    : app_(app), ui_(ui), net_(net), buildDate_(buildDate) {}
+WebHub::WebHub(App& app, UiController& ui, NetManager& net, LittleFsPumpImage& pumpImage, const std::string& buildDate)
+    : app_(app), ui_(ui), net_(net), pumpImage_(pumpImage), buildDate_(buildDate) {}
 
 void WebHub::begin() {
   if (started_) {
@@ -47,6 +47,7 @@ void WebHub::begin() {
   setSnapshot(helloSnap_, helloJson(app_.simulator(), app_.config().hostname, buildDate_));
   setSnapshot(configSnap_, configMessageJson(app_.configJson()));
   setSnapshot(pumpsSnap_, pumpsJson(app_));
+  setSnapshot(pumpFwSnap_, pumpFwJson(app_));
   {
     std::lock_guard<std::mutex> lock(snapMutex_);
     wifiSnap_ = wifiInfo();
@@ -60,6 +61,7 @@ void WebHub::begin() {
   routeStatic();
   routeApi();
   routeOta();
+  routePumpFirmware();
 
   server_.onNotFound([this](AsyncWebServerRequest* req) {
     if (net_.apMode()) {
@@ -243,6 +245,57 @@ void WebHub::routeOta() {
       });
 }
 
+void WebHub::routePumpFirmware() {
+  // Stores a pump firmware image. Nothing is sent to a pump until someone
+  // presses Update pumps (pumpFwUpdate).
+  server_.on(
+      "/api/pump-firmware", HTTP_POST,
+      [this](AsyncWebServerRequest* req) {
+        if (pumpFwBusy_ || pumpFwFailed_) {
+          LOG_W("PUMP", "Pump firmware upload refused: %s", pumpFwError_.c_str());
+          JsonDocument doc;
+          doc["ok"] = false;
+          doc["message"] = pumpFwError_;
+          std::string body;
+          serializeJson(doc, body);
+          req->send(pumpFwBusy_ ? 409 : 400, "application/json", body.c_str());
+          return;
+        }
+        PumpImageInfo info = pumpImage_.info();
+        LOG_I("PUMP", "Stored pump firmware %s (%u bytes)", info.version.c_str(), static_cast<unsigned>(info.size));
+        Command cmd;
+        cmd.type = Command::Type::PumpFwChanged;
+        app_.post(std::move(cmd));
+        req->send(200, "application/json", "{\"ok\":true}");
+      },
+      [this](AsyncWebServerRequest* req, const String&, size_t index, uint8_t* data, size_t len, bool final) {
+        if (index == 0) {
+          pumpFwFailed_ = false;
+          pumpFwBusy_ = busy_;
+          pumpFwError_.clear();
+          if (pumpFwBusy_) {
+            pumpFwError_ = "The controller is busy; upload when it is idle";
+            return;
+          }
+          if (!pumpImage_.beginUpload(req->contentLength(), pumpFwError_)) {
+            pumpFwFailed_ = true;
+            return;
+          }
+        }
+        if (pumpFwBusy_ || pumpFwFailed_) {
+          return;
+        }
+        if (!pumpImage_.writeUpload(data, len, pumpFwError_)) {
+          pumpFwFailed_ = true;
+          pumpImage_.abortUpload();
+          return;
+        }
+        if (final && !pumpImage_.finishUpload(pumpFwError_)) {
+          pumpFwFailed_ = true;
+        }
+      });
+}
+
 void WebHub::onWsEvent(AsyncWebSocket*, AsyncWebSocketClient* client, AwsEventType type, void* arg,
                        uint8_t* data, size_t len) {
   switch (type) {
@@ -320,6 +373,7 @@ void WebHub::sendSnapshot(AsyncWebSocketClient* client) {
   client->text(snapshot(stateSnap_).c_str());
   client->text(snapshot(pumpsSnap_).c_str());
   client->text(snapshot(configSnap_).c_str());
+  client->text(snapshot(pumpFwSnap_).c_str());
   client->text(logHistoryJson(logger().history()).c_str());
 }
 
@@ -381,6 +435,14 @@ void WebHub::tick() {
   }
   if (otaRebootAt_ != 0 && timeReached(now, otaRebootAt_)) {
     ESP.restart();
+  }
+}
+
+void WebHub::onPumpFwChanged() {
+  std::string msg = pumpFwJson(app_);
+  if (msg != snapshot(pumpFwSnap_)) {
+    setSnapshot(pumpFwSnap_, msg);
+    broadcast(msg);
   }
 }
 

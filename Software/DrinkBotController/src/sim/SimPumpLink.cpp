@@ -58,6 +58,34 @@ std::vector<SimPumpLink::PumpSpec> SimPumpLink::specsFromConfig(const Config& co
   return specs;
 }
 
+bool SimPumpLink::connected() const {
+  return pumps_.empty() || !pumps_.front().booting ||
+         (timeReached(clock_.nowMs(), pumps_.front().bootUntil) &&
+          pumps_.front().installFault != InstallFault::NeverReturns);
+}
+
+void SimPumpLink::setInstallFault(int id, InstallFault fault) {
+  if (Pump* p = find(id)) {
+    p->installFault = fault;
+  }
+}
+
+void SimPumpLink::setRefuseImage(int id, bool refuse) {
+  if (Pump* p = find(id)) {
+    p->refuseImage = refuse;
+  }
+}
+
+std::string SimPumpLink::firmwareVersion(int id) const {
+  const Pump* p = find(id);
+  return p ? p->version : "";
+}
+
+int SimPumpLink::installCount(int id) const {
+  const Pump* p = find(id);
+  return p ? p->installs : 0;
+}
+
 std::vector<int> SimPumpLink::pumpIds() const {
   std::vector<int> ids;
   for (const auto& p : pumps_) {
@@ -113,6 +141,9 @@ bool SimPumpLink::writeLine(const std::string& line) {
   if (!bridge) {
     return true;
   }
+  if (bridge->booting) {
+    return false;  // no USB device while it reboots
+  }
 
   std::vector<std::string> tokens = tokenize(line);
   if (tokens.empty()) {
@@ -155,7 +186,7 @@ bool SimPumpLink::writeLine(const std::string& line) {
     }
     std::vector<std::string> local;
     for (auto& p : pumps_) {
-      if (p.missing) {
+      if (p.missing || p.booting) {
         continue;
       }
       auto reply = execute(p, inner);
@@ -172,7 +203,7 @@ bool SimPumpLink::writeLine(const std::string& line) {
   bridgePending_ = true;
   bridgePendingUntil_ = now + kBridgeTimeoutMs;
   Pump* p = find(target);
-  if (!p || p->missing) {
+  if (!p || p->missing || p->booting) {
     schedule(kBridgeTimeoutMs, "R,TIMEOUT");
     return true;
   }
@@ -221,6 +252,12 @@ void SimPumpLink::tick() {
 }
 
 void SimPumpLink::advance(Pump& p, uint32_t now) {
+  if (p.booting && timeReached(now, p.bootUntil) && p.installFault != InstallFault::NeverReturns) {
+    p.booting = false;
+    if (p.installFault == InstallFault::None) {
+      p.version = p.fwImageVersion;
+    }
+  }
   if (!p.active) {
     return;
   }
@@ -250,7 +287,7 @@ std::vector<std::string> SimPumpLink::execute(Pump& p, const std::string& comman
   char buf[64];
 
   auto startMotion = [&](bool reverse, uint32_t ms) {
-    if (p.id == kBridgeBoardId || p.active || ms == 0 || ms > kMaxMotionMs) {
+    if (p.id == kBridgeBoardId || p.fwState != 0 || p.active || ms == 0 || ms > kMaxMotionMs) {
       return false;
     }
     p.active = true;
@@ -309,6 +346,57 @@ std::vector<std::string> SimPumpLink::execute(Pump& p, const std::string& comman
     if (ok) {
       p.id = id;
     }
+  } else if (cmd == "fwbegin" && args > 1) {
+    p.fwState = 0;
+    p.fwSize = strtoul(t[1].c_str(), nullptr, 10);
+    ok = !p.active && p.fwSize > 0 && t[2].size() == 32;
+    if (ok) {
+      p.fwState = 1;
+      p.fwReceived = 0;
+      p.fwLastChunk = 0;
+      p.fwExpectedMd5 = t[2];
+      p.fwScanner = PumpImageScanner();
+    }
+  } else if (cmd == "fwdata" && args > 1) {
+    uint32_t offset = strtoul(t[1].c_str(), nullptr, 10);
+    uint8_t chunk[192];
+    int n = base64Decode(t[2], chunk, sizeof(chunk));
+    if (p.fwState != 1 || n <= 0) {
+      ok = false;
+    } else if (p.refuseImage) {
+      ok = false;
+      p.fwState = 0;
+    } else if (offset == p.fwReceived && offset + n <= p.fwSize) {
+      p.fwScanner.add(chunk, n);
+      p.fwReceived += n;
+      p.fwLastChunk = n;
+    } else {
+      ok = offset + n == p.fwReceived && static_cast<size_t>(n) == p.fwLastChunk;
+    }
+  } else if (cmd == "fwend") {
+    if (p.fwState != 2) {
+      PumpImageInfo info;
+      std::string why;
+      ok = p.fwState == 1 && p.fwReceived == p.fwSize && p.fwScanner.finish(info, why) &&
+           info.md5 == p.fwExpectedMd5;
+      p.fwState = ok ? 2 : 0;
+      p.fwImageVersion = info.version;
+    }
+  } else if (cmd == "fwapply") {
+    ok = p.fwState == 2 && !p.active;
+    if (ok) {
+      p.fwState = 0;
+      p.booting = true;
+      p.bootUntil = now + kInstallMs;
+      p.installs++;
+    }
+  } else if (cmd == "fwabort") {
+    p.fwState = 0;
+  } else if (cmd == "fwstat") {
+    static const char* const kNames[] = {"IDLE", "RECEIVING", "STAGED"};
+    snprintf(buf, sizeof(buf), "P,FW,%s,%lu,%lu", kNames[p.fwState], static_cast<unsigned long>(p.fwReceived),
+             static_cast<unsigned long>(p.fwSize));
+    out.push_back(buf);
   } else if (cmd == "scfg") {
   } else {
     out.push_back("R,INVLD");

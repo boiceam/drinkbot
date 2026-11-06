@@ -28,7 +28,9 @@
 
 // --- Global Constants ---
 constexpr uint32_t kLedBootAnimationTimeMs = 5000;
-constexpr uint32_t kCommBusBaudRate = 50000;
+// The bus speed, in a tag the controller reads from an image before accepting
+// it: a different speed would strand pumps partway through a bus update.
+const char kBusTag[] = "DBP-BUS:50000";
 constexpr uint32_t kBridgeTimeoutMs = 3000;  // > the ~1.8 s blocking tare/cal at 10 samples/s
 constexpr uint8_t  kScaleReadingsPerMeasurement = 1;
 constexpr uint32_t kScaleActionWaitTimeMs = 2000;
@@ -82,7 +84,7 @@ constexpr uint16_t kConfigEepromAddress = 0;
 // Identifies a pump image: the update tool reads the version from this tag, and
 // fwend refuses an image without one (a valid sketch that isn't pump firmware).
 // `version` reads from it too, which also keeps the linker from removing it.
-const char kImageTag[] = "DBP-IMAGE:0.7.0";
+const char kImageTag[] = "DBP-IMAGE:0.7.1";
 const char* kFirmwareVersion = kImageTag + 10;
 
 constexpr uint8_t kPumpEnabled = 1;
@@ -122,6 +124,7 @@ uint32_t bridgeTimeoutMs = 0;
 uint32_t pumpStartTime = 0;
 uint32_t pumpDurationMs = 0;
 bool pumpActive = false;
+bool pumpStartPending = false;  // accepted, motor not energized yet
 uint8_t pumpDirection = kPumpForward;
 
 // --- LED Configuration ---
@@ -633,7 +636,7 @@ void initCommBus() {
   pinMode(kMcuUart0RxPin, INPUT);
   pinMode(kPlcDirPin, OUTPUT);
 
-  Serial1.begin(kCommBusBaudRate);
+  Serial1.begin(strtoul(kBusTag + 8, NULL, 10));
 }
 
 void initPump() {
@@ -661,14 +664,10 @@ bool startPump(uint8_t direction, uint32_t durationMs) {
     return false;
   }
 
+  // pumpTask energizes the motor on the next loop pass, after this command's
+  // reply has gone out: motor start-up current can corrupt bus traffic.
   pumpDirection = direction;
-  if (direction == kPumpForward) {
-    digitalWrite(kPumpIn1Pin, kPumpDisabled);
-    digitalWrite(kPumpIn2Pin, kPumpEnabled);
-  } else {
-    digitalWrite(kPumpIn1Pin, kPumpEnabled);
-    digitalWrite(kPumpIn2Pin, kPumpDisabled);
-  }
+  pumpStartPending = true;
   pumpStartTime = millis();
   pumpDurationMs = durationMs;
   pumpActive = true;
@@ -677,6 +676,7 @@ bool startPump(uint8_t direction, uint32_t durationMs) {
 
 void stopPump() {
   pumpActive = false;
+  pumpStartPending = false;
   digitalWrite(kPumpIn1Pin, kPumpDisabled);
   digitalWrite(kPumpIn2Pin, kPumpDisabled);
 }
@@ -693,6 +693,17 @@ uint32_t pumpRemainingMs() {
 }
 
 void pumpTask() {
+  if (pumpStartPending) {
+    pumpStartPending = false;
+    if (pumpDirection == kPumpForward) {
+      digitalWrite(kPumpIn1Pin, kPumpDisabled);
+      digitalWrite(kPumpIn2Pin, kPumpEnabled);
+    } else {
+      digitalWrite(kPumpIn1Pin, kPumpEnabled);
+      digitalWrite(kPumpIn2Pin, kPumpDisabled);
+    }
+    pumpStartTime = millis();  // the run time starts when the motor does
+  }
   if (pumpActive) {
     // Subtraction keeps this correct across millis() rollover
     if ((millis() - pumpStartTime) >= pumpDurationMs) {

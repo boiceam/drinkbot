@@ -60,7 +60,7 @@ class TransactionParser {
 // Builds the line to send (without '\n'): the command itself for the
 // directly attached pump, or "bridge <id> <command>" for any other.
 // Returns false (and leaves `out` empty) when the command breaks the
-// pump firmware's limits: <= 63 chars, first token <= 15 chars, at most
+// pump firmware's limits: <= kMaxPumpCommand chars, first token <= 15 chars, at most
 // 8 tokens on the pump's line (so 6 inside a bridge), no '|', ']' or newline.
 bool buildWireCommand(bool direct, int pumpId, const std::string& command, std::string& out);
 
@@ -88,6 +88,8 @@ constexpr const char* kMinPumpFirmware = "0.6.0";
 // Longest single run the pump firmware accepts (kMaxMotionMs, PF-3)
 constexpr uint32_t kMaxPumpRunMs = 120000;
 constexpr int kBroadcastId = 255;
+// Longest command a pump accepts through the bridge (firmware 0.6.0, fwdata)
+constexpr size_t kMaxPumpCommand = 200;
 // `gid` from the board on USB: a dedicated bridge board, which isn't a pump
 constexpr int kBridgeBoardId = 0;
 

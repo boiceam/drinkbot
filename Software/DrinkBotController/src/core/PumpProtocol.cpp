@@ -158,7 +158,7 @@ bool TransactionParser::feed(const std::string& line) {
 
 bool buildWireCommand(bool direct, int pumpId, const std::string& command, std::string& out) {
   out.clear();
-  if (command.empty() || command.size() > 63) {
+  if (command.empty() || command.size() > kMaxPumpCommand) {
     return false;
   }
   if (command.find_first_of("|]\n\r") != std::string::npos) {

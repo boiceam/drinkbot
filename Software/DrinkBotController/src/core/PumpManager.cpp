@@ -135,6 +135,7 @@ void PumpManager::startDiscovery() {
       bridgeResponding_ = true;
       errors_.clearError(ErrorCode::BridgeUnresponsive, 0);
       engine_.setBridgeId(id);
+      bridgeVersion_ = version;
       if (id == kBridgeBoardId) {
         LOG_I("PUMP", "Dedicated bridge board, firmware %s", version.c_str());
       } else {
