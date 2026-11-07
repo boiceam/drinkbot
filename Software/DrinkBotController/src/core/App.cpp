@@ -215,6 +215,17 @@ void App::checkUsb() {
     pumps_.startDiscovery();
   }
   wasConnected_ = connected;
+
+  // A device that can't be the bridge (one in USB boot mode, say): say what it
+  // is, in place of discovery's "did not answer". Raised every tick, because a
+  // rescan's failed discovery puts the generic message back.
+  std::string problem = transport_.deviceProblem();
+  if (!problem.empty()) {
+    system_.raiseError(ErrorCode::BridgeUnresponsive, 0, problem);
+  } else if (!usbProblem_.empty() && !connected) {
+    system_.raiseError(ErrorCode::BridgeUnresponsive, 0, "No bridge board on USB");
+  }
+  usbProblem_ = problem;
 }
 
 void App::reply(Command& cmd, const CommandResult& result) {

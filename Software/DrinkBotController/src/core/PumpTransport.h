@@ -18,6 +18,9 @@ class IPumpTransport {
   virtual bool readLine(std::string& line) = 0;
   // Called every App tick (the simulator advances its pumps here).
   virtual void tick() {}
+  // Non-empty while a device is attached that can't be used as the bridge
+  // (e.g. "in USB boot mode"); connected() is false meanwhile.
+  virtual std::string deviceProblem() const { return {}; }
 };
 
 }  // namespace drinkbot

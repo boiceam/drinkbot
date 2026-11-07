@@ -170,6 +170,7 @@ class App {
 
   bool started_ = false;
   bool wasConnected_ = false;
+  std::string usbProblem_;  // transport_.deviceProblem() at the last tick
   bool maintenanceBusy_ = false;
   bool rebootPending_ = false;
   uint32_t rebootAt_ = 0;

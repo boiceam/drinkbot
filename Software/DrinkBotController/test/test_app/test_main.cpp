@@ -427,6 +427,67 @@ void test_tare_and_cal_wait_for_slow_scale() {
   TEST_ASSERT_TRUE_MESSAGE(r.ok, r.message.c_str());
 }
 
+// The simulator behind a USB link that can report an unusable device
+class ProblemLink : public IPumpTransport {
+ public:
+  explicit ProblemLink(SimPumpLink& sim) : sim_(sim) {}
+  std::string problem;
+  bool attached = true;
+  bool connected() const override { return problem.empty() && attached && sim_.connected(); }
+  bool writeLine(const std::string& line) override { return connected() && sim_.writeLine(line); }
+  bool readLine(std::string& line) override { return sim_.readLine(line); }
+  void tick() override { sim_.tick(); }
+  std::string deviceProblem() const override { return problem; }
+
+ private:
+  SimPumpLink& sim_;
+};
+
+void test_unusable_usb_device_is_named() {
+  FakeClock clock;
+  SimPumpLink sim{clock, SimPumpLink::specsFromConfig(parsedConfig())};
+  ProblemLink link{sim};
+  link.problem = "The board on USB is in USB boot mode (BOOTSEL)";
+  App app{link, clock};
+  app.begin(kConfig, false);
+  auto bridgeError = [&]() -> std::string {
+    for (const auto& e : app.system().errors()) {
+      if (e.code == ErrorCode::BridgeUnresponsive) {
+        return e.message;
+      }
+    }
+    return "";
+  };
+  auto run = [&](uint32_t ms) {
+    for (uint32_t i = 0; i < ms; i++) {
+      clock.t++;
+      app.tick();
+    }
+  };
+  run(5000);
+  TEST_ASSERT_FALSE(app.system().booting());
+  TEST_ASSERT_EQUAL_STRING("The board on USB is in USB boot mode (BOOTSEL)", bridgeError().c_str());
+
+  // A rescan's failed discovery doesn't replace the explanation
+  Command rescan;
+  rescan.type = Command::Type::Rescan;
+  app.post(rescan);
+  run(5000);
+  TEST_ASSERT_EQUAL_STRING("The board on USB is in USB boot mode (BOOTSEL)", bridgeError().c_str());
+
+  // Unplugged
+  link.problem.clear();
+  link.attached = false;
+  run(100);
+  TEST_ASSERT_EQUAL_STRING("No bridge board on USB", bridgeError().c_str());
+
+  // A flashed bridge plugged in: found, and the error clears
+  link.attached = true;
+  run(5000);
+  TEST_ASSERT_EQUAL_STRING("", bridgeError().c_str());
+  TEST_ASSERT_EQUAL(0, app.pumps().bridgeId());
+}
+
 void test_reboot_requires_force_while_busy() {
   Rig rig;
   TEST_ASSERT_TRUE(rig.send(make(Command::Type::PrimeAll)).ok);
@@ -566,5 +627,6 @@ int main() {
   RUN_TEST(test_maintenance_raw_and_set_id);
   RUN_TEST(test_tare_and_cal_wait_for_slow_scale);
   RUN_TEST(test_reboot_requires_force_while_busy);
+  RUN_TEST(test_unusable_usb_device_is_named);
   return UNITY_END();
 }

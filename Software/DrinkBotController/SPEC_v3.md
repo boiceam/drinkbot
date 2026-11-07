@@ -17,6 +17,7 @@ Requirement keywords: **shall** means mandatory, **may** means optional. Every r
 | 1 | Initial spec (`SPEC.md`). |
 | 2 | Restructured. Added pump protocol details, pump firmware v0.3.0 changes, config schema, state model, WebSocket protocol, error catalog and acceptance tests. |
 | 3 | All v2 recommendations and assumptions approved. PF-9, PF-10 and the AP captive DNS are now required. Added a per-pump `autoPrimeSec` config value, plus **Prime All** and **Purge All** (§9.6.2). |
+| 3.9 | USB link hardening after the first test with a real bridge board (§5.1): a device that isn't a serial port, such as a board in USB boot mode, is named in `E_BRIDGE_UNRESPONSIVE` instead of being used; a link whose transfers fail is closed and reopened. |
 | 3.8 | Web and TCP libraries updated after a crash on hardware. Wi-Fi power saving off. A client whose queue is full misses messages and gets the current state once it has room; it is no longer disconnected. |
 | 3.7 | **No captive portal** (D-18): the AP no longer runs a DNS server, and unknown URLs return 404. |
 | 3.6 | **Pump firmware update from the controller**, only when the Update pumps button is pressed (D-17, §9.10). Pump firmware 0.7.1: the motor starts after its command's reply, and images declare their bus speed (PF-15). Commands up to 200 characters. New error `E_PUMP_UPDATE`. |
@@ -245,7 +246,9 @@ The DrinkBotController is a YD-ESP32-S3 board that dispenses mixed drinks. It do
 - The controller opens the first CDC-ACM interface it enumerates. It does not filter by VID/PID; the device it finds is expected to be RP2040 `arduino-pico`.
 - Line coding is 115200 8N1. This is nominal for USB CDC but set anyway.
 - After opening, the controller **shall assert DTR and RTS**. The RP2040 TinyUSB CDC stack may drop TX until DTR is asserted.
-- Detection: if no CDC device enumerates within `USB_DETECT_TIMEOUT_MS` (3000) after USB host start, the controller enters **Simulator mode** (§16).
+- Detection: if no USB device enumerates within `USB_DETECT_TIMEOUT_MS` (3000) after USB host start, the controller enters **Simulator mode** (§16).
+- **A device that isn't a serial port** (it has no CDC control interface, so line coding is refused) is held open but never used, and `E_BRIDGE_UNRESPONSIVE` names it until it is unplugged. An RP2040 or RP2350 in USB boot mode (BOOTSEL, Raspberry Pi VID `2E8A`, PID `0003` / `000F`) is reported as a board with no pump firmware that needs flashing over USB. A blank RP2040 boots this way. The controller is not in Simulator mode while such a device is attached. *(Rev 3.9.)*
+- **Failed transfers:** the USB host driver stops reading after a transfer error, with no disconnect event. So after any CDC error event, a TX error other than a timeout, or 3 TX timeouts in a row, the controller closes the link, waits 1 s and reopens it. This is handled as a disconnect and re-enumeration (`E_USB_LOST`, then discovery). *(Rev 3.9.)*
 - Disconnect at runtime: abort any operation and enter Error `E_USB_LOST`. When a device re-enumerates, re-run discovery (§9.3).
 
 ### 5.2 Line framing (controller side)
@@ -917,7 +920,7 @@ An editable table with columns pump ID, liquid, ms/ml, density g/ml, color picke
 | Code | Severity | Raised when | Cleared when |
 |---|---|---|---|
 | `E_USB_LOST` | Blocking | CDC device detached at runtime | Re-enumeration plus successful discovery |
-| `E_BRIDGE_UNRESPONSIVE` | Blocking | The bridge doesn't answer `version` | Rescan succeeds |
+| `E_BRIDGE_UNRESPONSIVE` | Blocking | The bridge doesn't answer `version`, or the USB device isn't a serial port (the message names it, e.g. USB boot mode) | Rescan succeeds, or a working bridge is plugged in |
 | `E_PUMP_MISSING(id)` | Degraded | No answer at discovery, or 3 poll failures | That pump answers |
 | `E_PUMP_FW(id)` | Degraded | Pump or bridge version < 0.6.0 (the bridge has no ID in the error) | Rescan finds ≥ 0.6.0 |
 | `E_CONFIG` | Degraded | `config.json` invalid; using backup/default | Successful config save |
