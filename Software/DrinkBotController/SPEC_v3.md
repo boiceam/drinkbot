@@ -17,6 +17,8 @@ Requirement keywords: **shall** means mandatory, **may** means optional. Every r
 | 1 | Initial spec (`SPEC.md`). |
 | 2 | Restructured. Added pump protocol details, pump firmware v0.3.0 changes, config schema, state model, WebSocket protocol, error catalog and acceptance tests. |
 | 3 | All v2 recommendations and assumptions approved. PF-9, PF-10 and the AP captive DNS are now required. Added a per-pump `autoPrimeSec` config value, plus **Prime All** and **Purge All** (§9.6.2). |
+| 3.8 | Web and TCP libraries updated after a crash on hardware. Wi-Fi power saving off. A client whose queue is full misses messages and gets the current state once it has room; it is no longer disconnected. |
+| 3.7 | **No captive portal** (D-18): the AP no longer runs a DNS server, and unknown URLs return 404. |
 | 3.6 | **Pump firmware update from the controller**, only when the Update pumps button is pressed (D-17, §9.10). Pump firmware 0.7.1: the motor starts after its command's reply, and images declare their bus speed (PF-15). Commands up to 200 characters. New error `E_PUMP_UPDATE`. |
 | 3.5 | **Dedicated bridge board at ID 0** instead of a dispensing pump as the bridge (D-16). Pump firmware 0.7.0: `sid 0` allowed over USB, and motion refused at ID 0 (PF-14). The controller checks the bridge's firmware version. A pump can still act as the bridge on the bench. |
 | 3.4 | Pump firmware 0.6.0: RS485 at 50 kbaud, and firmware update over USB or the bus (PF-13). The controller now requires 0.6.0; its update support is not built yet. |
@@ -71,11 +73,12 @@ There are no open items.
 | D-10 | **Missing pump at boot:** degraded error state (§17). |
 | D-11 | **Pour check:** compare against the weight change and log a warning only (§9.5). |
 | D-12 | **Extras in scope:** pump maintenance UI, config import/export, OTA, mDNS. |
-| D-13 | **All v2 recommendations approved:** pump firmware safety cap (PF-9), `sid` range check (PF-10), and the captive DNS in AP mode (§9.2) are required. |
+| D-13 | **All v2 recommendations approved:** pump firmware safety cap (PF-9), `sid` range check (PF-10), and the captive DNS in AP mode (§9.2; removed by D-18) are required. |
 | D-14 | **Auto prime:** each pump has an `autoPrimeSec` config value. **Prime All** primes each pump in turn for its `autoPrimeSec`. **Purge All** purges each pump in turn for `1.5 × autoPrimeSec` (§9.6.2). |
 | D-15 | **One pump at a time:** the pump power supply is sized for a single running pump, so **no two pumps may ever run at the same time**. Pours, Prime All / Purge All and manual prime/purge are sequential; a new run starts only after the previous pump is confirmed stopped (§9.5, §9.6). The raw maintenance console refuses `dispense`/`prime`/`purge`/`bridge` (§14). Bench tests must follow the same rule. *(Rev 3.3.)* |
 | D-16 | **Dedicated bridge board:** in the final system the RS485 bridge is a dedicated pump board, not a dispensing pump. **ID 0** identifies it as a bridge and not a pump, so it isn't in the pump list, runs no motor, and can't be addressed on the bus. A pump with no ID yet also has ID 0, so it behaves the same way until it gets one. *(Rev 3.5.)* |
 | D-17 | **Pump firmware updates only on request:** uploading a file stores it and shows what could be updated. Nothing is sent to any board until someone presses **Update pumps** and confirms. An automatic mode was considered and left out: an update blocks drinks for several minutes, and there is no rollback. *(Rev 3.6.)* |
+| D-18 | **No captive portal in AP mode:** Apple phones and laptops open a detected portal in a special limited browser window, which causes problems for the web app. So the AP runs no DNS server, and the UI is opened by address. *(Rev 3.7.)* |
 
 ### 1.2 Approved assumptions
 
@@ -191,7 +194,7 @@ The DrinkBotController is a YD-ESP32-S3 board that dispenses mixed drinks. It do
 | Purpose | Library |
 |---|---|
 | USB host CDC-ACM | ESP-IDF `usb_host` + `espressif/usb_host_cdc_acm` component |
-| Web server + WebSocket | `ESPAsyncWebServer` + `AsyncTCP` (maintained fork: mathieucarbou) |
+| Web server + WebSocket | `ESPAsyncWebServer` 3.12 + `AsyncTCP` 3.5 (ESP32Async). AsyncTCP 3.3.2 crashed in `AsyncServer::_accept` when clients reset connections (seen on hardware, rev 3.8). |
 | JSON | `ArduinoJson` v7 |
 | NeoPixels | `Adafruit NeoPixel` (RMT-backed on ESP32) |
 | mDNS | `ESPmDNS` (core) |
@@ -497,7 +500,7 @@ any --USB lost--> ERROR (E_USB_LOST)
 - Try each configured network in order, splitting the time among them, for **20 s total**. Each try is about `20 s / n` but at least 6 s, so a long list may not reach every entry.
 - On success: STA mode, Wi-Fi LED solid green, start mDNS `<hostname>.local` with an `_http._tcp` service, and log the IP and RSSI.
 - On failure: start an **open** AP with SSID `device.apSsid` (default `DrinkBot`), IP `192.168.4.1/24`, and DHCP. Wi-Fi LED solid yellow. mDNS also runs in AP mode.
-  - Run a captive DNS server that resolves every name to 192.168.4.1, so phones open the UI automatically.
+  - No captive portal (D-18): open `http://192.168.4.1` or `http://<hostname>.local` by hand. The device may warn that the network has no internet.
 - STA connection lost at runtime: Wi-Fi LED goes back to blinking green while auto-reconnect runs. AP fallback is **not** re-triggered [A-10].
 
 ### 9.3 Pump discovery & rediscovery
@@ -748,7 +751,7 @@ The server listens on port 80 with no authentication (per v1). All responses are
 | `GET /api/info` | `{fwVersion, buildDate, uptimeMs, freeHeap, simulator, ip, wifiMode}` |
 | `POST /api/pump-firmware` | Multipart pump firmware `.bin` upload (§9.10). Stores the file only; no board is touched. 409 unless READY/ERROR and idle; 400 with `{ok:false,message}` if the image is refused. |
 | `POST /api/ota` | Multipart firmware `.bin` upload. Rejected (409) unless READY/ERROR and idle. Progress goes out as `ota` WS messages. On success: log, reply, then reboot after 1 s. On failure: abort, stay on the current image. |
-| *(any other)* | In AP mode with captive DNS: redirect to `/`. Otherwise 404. |
+| *(any other)* | 404. |
 
 OTA validates the image header (ESP32-S3 chip ID) before committing. The bootloader's rollback is enabled: the new image marks itself valid only after the web server has started successfully.
 

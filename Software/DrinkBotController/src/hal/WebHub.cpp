@@ -63,13 +63,7 @@ void WebHub::begin() {
   routeOta();
   routePumpFirmware();
 
-  server_.onNotFound([this](AsyncWebServerRequest* req) {
-    if (net_.apMode()) {
-      req->redirect("http://192.168.4.1/");  // captive portal
-    } else {
-      req->send(404, "text/plain", "Not found");
-    }
-  });
+  server_.onNotFound([](AsyncWebServerRequest* req) { req->send(404, "text/plain", "Not found"); });
 
   server_.begin();
   started_ = true;
@@ -307,6 +301,7 @@ void WebHub::onWsEvent(AsyncWebSocket*, AsyncWebSocketClient* client, AwsEventTy
         return;
       }
       LOG_I("WEB", "Browser connected from %s", client->remoteIP().toString().c_str());
+      client->setCloseClientOnQueueFull(false);  // replies are dropped, never the connection
       sendSnapshot(client);
       return;
     case WS_EVT_DISCONNECT:
@@ -378,9 +373,31 @@ void WebHub::sendSnapshot(AsyncWebSocketClient* client) {
 }
 
 void WebHub::broadcast(const std::string& msg) {
-  if (started_ && ws_.count() > 0) {
-    ws_.textAll(msg.c_str());
+  if (started_ && ws_.count() > 0 && !sendToClients(msg)) {
+    resyncPending_ = true;
   }
+}
+
+bool WebHub::sendToClients(const std::string& msg) {
+  // textAll holds the library's client-list lock; never walk getClients() from
+  // here, because the AsyncTCP task adds and removes clients at any moment.
+  return ws_.textAll(msg.c_str(), msg.size()) == AsyncWebSocket::ENQUEUED;
+}
+
+// A dropped message may have been the last state change, so once every client
+// has room again, send them where things stand now.
+void WebHub::resyncSlowClients() {
+  if (!resyncPending_) {
+    return;
+  }
+  if (!ws_.availableForWriteAll()) {
+    return;
+  }
+  resyncPending_ = false;
+  LOG_D("WEB", "Client caught up; resending state");
+  broadcast(snapshot(stateSnap_));
+  broadcast(snapshot(pumpsSnap_));
+  broadcast(snapshot(pumpFwSnap_));
 }
 
 void WebHub::setSnapshot(std::string& slot, const std::string& value) {
@@ -429,6 +446,7 @@ void WebHub::tick() {
 
   flushLogs();
   ws_.cleanupClients(kMaxClients);
+  resyncSlowClients();
 
   if (otaRebootPending_ && otaRebootAt_ == 0) {
     otaRebootAt_ = now + kOtaRebootDelayMs;
@@ -510,7 +528,7 @@ void WebHub::flushLogs() {
     return;  // new clients get the history instead
   }
   for (const auto& e : batch) {
-    ws_.textAll(logJson(e).c_str());
+    sendToClients(logJson(e));
   }
   if (dropped > 0) {
     LogEntry notice;
@@ -518,7 +536,7 @@ void WebHub::flushLogs() {
     notice.level = LogLevel::Warn;
     notice.tag = "WEB";
     notice.msg = "... " + std::to_string(dropped) + " lines dropped";
-    ws_.textAll(logJson(notice).c_str());
+    sendToClients(logJson(notice));
   }
 }
 

@@ -73,6 +73,8 @@ void setup() {
   logger().addSink(&uartSink, LogLevel::Debug);
   LOG_I("SYS", "DrinkBotController starting (build %s %s, reset reason %d)", __DATE__, __TIME__,
         static_cast<int>(esp_reset_reason()));
+  LOG_I("SYS", "Flash %u MB; PSRAM %u MB, %u KB free", static_cast<unsigned>(ESP.getFlashChipSize() / (1024 * 1024)),
+        static_cast<unsigned>(ESP.getPsramSize() / (1024 * 1024)), static_cast<unsigned>(ESP.getFreePsram() / 1024));
 
   // §9.1 step 2: status LED white before the 3 s USB detection
   std::array<Rgb, kLedCount> bootFrame{};
@@ -103,6 +105,7 @@ void setup() {
   if (simulator) {
     LOG_W("SIM", "No pump USB device within 3 s: running in SIMULATOR mode");
     simLink.reset(new SimPumpLink(clock_, SimPumpLink::specsFromConfig(config)));
+    simLink->setRecordTraffic(false);
     app.reset(new App(*simLink, clock_, simLink.get()));
   } else {
     app.reset(new App(usbLink, clock_));

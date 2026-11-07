@@ -85,6 +85,9 @@ class SimPumpLink : public IPumpTransport {
   LedState led(int id) const;
   const std::vector<std::string>& received() const { return received_; }
   void clearReceived() { received_.clear(); }
+  // On by default for unit tests. Must be off on the board: a pump firmware
+  // update alone would add hundreds of KB, and the heap would run out.
+  void setRecordTraffic(bool record) { recordTraffic_ = record; }
 
  private:
   struct Pump {
@@ -130,6 +133,7 @@ class SimPumpLink : public IPumpTransport {
   std::vector<Pump> pumps_;
   std::multimap<uint32_t, std::string> outbox_;
   std::vector<std::string> received_;
+  bool recordTraffic_ = true;
   uint32_t bridgePendingUntil_ = 0;
   bool bridgePending_ = false;
 };

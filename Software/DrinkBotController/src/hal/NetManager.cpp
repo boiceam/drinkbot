@@ -11,7 +11,6 @@ namespace drinkbot {
 namespace {
 const IPAddress kApIp(192, 168, 4, 1);
 const IPAddress kApMask(255, 255, 255, 0);
-constexpr uint16_t kDnsPort = 53;
 }  // namespace
 
 void NetManager::begin(const Config& config) {
@@ -29,6 +28,7 @@ void NetManager::begin(const Config& config) {
     return;
   }
   WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);  // mains powered; modem sleep adds 100+ ms of latency
   WiFi.setAutoReconnect(true);
   perNetworkMs_ = std::max<uint32_t>(kConnectTotalMs / networks_.size(), kMinPerNetworkMs);
   tryNetwork(0);
@@ -46,7 +46,6 @@ void NetManager::tryNetwork(size_t index) {
 
 void NetManager::tick() {
   if (apStarted_) {
-    dns_.processNextRequest();
     return;
   }
 
@@ -91,8 +90,6 @@ void NetManager::startAccessPoint() {
   if (!WiFi.softAP(apSsid_.c_str())) {  // no password: open network
     LOG_E("NET", "Could not start access point '%s'", apSsid_.c_str());
   }
-  dns_.setErrorReplyCode(DNSReplyCode::NoError);
-  dns_.start(kDnsPort, "*", kApIp);  // captive DNS: every name -> 192.168.4.1
   apStarted_ = true;
   mode_ = WifiMode::AccessPoint;
   LOG_I("NET", "Open access point '%s' started at %s", apSsid_.c_str(), kApIp.toString().c_str());

@@ -60,6 +60,9 @@ class WebHub : public IAppListener, public ILogSink {
   void onWsMessage(uint32_t clientId, const std::string& text);
   void sendSnapshot(AsyncWebSocketClient* client);
   void broadcast(const std::string& msg);
+  // False if a client's queue was full and it missed this message
+  bool sendToClients(const std::string& msg);
+  void resyncSlowClients();
   void setSnapshot(std::string& slot, const std::string& value);
   std::string snapshot(const std::string& slot);
   WifiInfo wifiInfo() const;
@@ -85,6 +88,7 @@ class WebHub : public IAppListener, public ILogSink {
 
   // Busy flag for the AsyncTCP side (OTA and config upload are refused)
   std::atomic<bool> busy_{true};
+  std::atomic<bool> resyncPending_{false};
 
   // WebSocket frame reassembly, per client (AsyncTCP task only)
   std::map<uint32_t, std::string> partial_;

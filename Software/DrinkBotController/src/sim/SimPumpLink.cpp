@@ -131,7 +131,9 @@ bool SimPumpLink::isBroadcastCommand(const std::string& command) {
 }
 
 bool SimPumpLink::writeLine(const std::string& line) {
-  received_.push_back(line);
+  if (recordTraffic_) {
+    received_.push_back(line);
+  }
   uint32_t now = clock_.nowMs();
   for (auto& p : pumps_) {
     advance(p, now);
